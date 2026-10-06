@@ -1,0 +1,10 @@
+#+TARGET: .. (project)
+
+* Scratch                                                           :project:
+
+#+begin_src sh
+  ls
+#+end_src
+
+#+RESULTS:
+: SKILL.md	user

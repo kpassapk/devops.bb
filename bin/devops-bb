@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# devops-bb TASK ARGS...: this project's bb tasks, from any directory.
+# Symlink it onto PATH; it finds bb.edn through the link.
+here=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+exec bb --config "$here/bb.edn" "$@"

@@ -1,0 +1,43 @@
+{:paths ["src"]
+ :deps {io.github.kpassapk/charm.clj
+        {:git/url "https://github.com/kpassapk/charm.clj.git"
+         :git/sha "b1b40757fc12e82da87c13c362c8c5308c33df3f"}}
+
+ :tasks
+ {dashboard
+  {:doc "Follow the devops.el execution log in a TUI"
+   :exec-fn devops.bb.dashboard/run
+   :org.babashka/cli {:spec {:log {:desc "Execution log; default: devops-execution-log from Emacs"}}}}
+
+  status     {:doc "Is Emacs reachable, devops-mode on, and where does it log"
+              :exec-fn devops.bb.cli/status}
+  output     {:doc "FILE LINE [--tag T]: what a block printed"
+              :exec-fn devops.bb.cli/output}
+  run-output {:doc "ID [--session S]: what one run printed"
+              :exec-fn devops.bb.cli/run-output}
+  sessions   {:doc "Live async sessions"
+              :exec-fn devops.bb.cli/sessions}
+  follow     {:doc "[--dir D] [--json]: a line per new log event under D"
+              :exec-fn devops.bb.cli/follow}
+  modified   {:doc "FILE: does Emacs hold unsaved edits to it"
+              :exec-fn devops.bb.cli/modified}
+  revert     {:doc "FILE: reload its buffer from disk"
+              :exec-fn devops.bb.cli/revert}
+  tools      {:doc "[REGEXP]: tools.org blocks for #+call:"
+              :exec-fn devops.bb.cli/tools}
+  drift      {:doc "FILE [--heading H | --custom-id ID]: compare tangles with targets"
+              :exec-fn devops.bb.cli/drift}
+
+  test
+  {:doc "Run tests"
+   :extra-paths ["test"]
+   :requires ([clojure.test :as t]
+              [devops.bb.cli-test]
+              [devops.bb.log-test]
+              [devops.bb.model-test]
+              [devops.bb.view-test])
+   :task (let [{:keys [fail error]} (t/run-tests 'devops.bb.cli-test
+                                                 'devops.bb.log-test
+                                                 'devops.bb.model-test
+                                                 'devops.bb.view-test)]
+           (when (pos? (+ fail error)) (System/exit 1)))}}}
