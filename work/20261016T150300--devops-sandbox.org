@@ -11,7 +11,7 @@ Users have a significant access scope via CLIs and Tailscale SSH.
 Best practices for security dictate that agents should be running in a
 sandbox, where they cannot access the user's file system or other
 credentialed services.  "Sandboxes" and other controls built into
-agent harnesses are fragile, and the agent can overcome them easily.
+agent harnesses are fragile, and the agent can overcome them easily. (I think.)
 
 We believe the only way to run agents is in a separate machine or container.
 Here, the agent writes files, runs local tools (in the sandbox, for example
@@ -34,7 +34,7 @@ We would like to use this as a dependency in other projects' =bb.edn= tasks.
 
 Claude Code runs in a *sandbox* and still works the devops-bb loop:
 
-- it writes and edits workbooks;
+- it writes and edits its one workbook;
 - the operator runs the blocks in Emacs, on the host;
 - Claude follows each run and reads its output;
 - it *never* executes anything on the servers, and holds nothing that
@@ -45,7 +45,7 @@ flowchart LR
   subgraph host["Host (operator)"]
     emacs["Emacs + devops.el"]
     log[("executions.jsonl")]
-    exp["devops-bb export"]
+    exp["devops-bb publish"]
   end
 
   servers["Servers"]
@@ -84,49 +84,129 @@ to it instead of wrapping it with scripts in each project
 
 ** The one idea
 
-devops.bb today answers from two sources on the host: the execution
+=devops.bb= today answers from two sources on the host: the execution
 log (a file) and Emacs (=emacsclient=). The sandbox can reach neither.
 
 So split devops.bb along that line:
 
-- *producer*, on the host: =devops-bb export= turns "log + Emacs" into
-  a *feed*, a self-contained directory of plain files, and publishes it
+- *producer*, on the host: =devops-bb publish= turns "log + Emacs" into
+  a *feed*, a self-contained directory of plain files, and pushes it
   to a *sink*.
+
 - *consumer*, in the sandbox: with =DEVOPS_BB_FEED=DIR=, the same
-  commands (=status=, =follow=, =run-output=, =output=) read the feed.
+  commands (=status=, =follow=, =run-output=, =modified=) read the feed.
   They never start =emacsclient=.
 
 Data flows one way, host → sandbox. The sandbox has no credential for
-the host. That is the whole security argument; every choice below
-keeps it.
+the host.
+
+** One workbook per sandbox
+
+A sandbox is bound to exactly one workbook, in one Emacs. The operator
+can have many sandboxes at once, one per workbook, all from the same
+Emacs.
+
+The execution log is shared: every Emacs and every workbook appends to
+it, and its lines do not say which Emacs wrote them. So the publisher,
+which runs on the host, is the boundary:
+
+- *One file.* =publish --file WORKBOOK= passes on only events whose
+  =file= is WORKBOOK, exactly (executes, results, tangles, drift, and
+  the edit events). A sandbox never sees another workbook's paths,
+  sessions or output. Because the feed is pushed, what the publisher
+  does not push, the sandbox does not have.
+- *One Emacs.* =publish --server NAME= runs =emacsclient -s NAME= for
+  everything it asks (=run-output=, the log path, =devops-mode=), so a
+  run's output is asked of the Emacs that ran it. Host mode keeps the
+  default server when =--server= is not given.
+
+*Attaching.* The operator attaches a workbook from its buffer with
+=devops-bb-sandbox-attach= (cljbang, =emacs/devops/bb/sandbox.clj=). It
+asks for the sink (=--via=, =--to=, =--map=) and starts =devops-bb
+publish --server (server-name) --file (buffer-file-name) …= as a child
+process of that Emacs, one per buffer. =devops-bb-sandbox-detach=, or
+killing the buffer, stops it; so does quitting Emacs. A stopped
+publisher stops the heartbeat, and the sandbox sees it go stale.
+Attaching a buffer that is already attached asks to replace its sink.
+
+*The sink is the operator's.* It is set in Emacs, never in the
+workbook: Claude writes the workbook, and a sink written there could
+point the push, with the operator's ssh credentials, anywhere.
+
+*Renames.* The binding is the file's path. When the attached buffer's
+file changes name (=set-visited-file-name=, a denote rename), the
+attach command restarts the publisher with =--file NEW --renamed-from
+OLD=. Before anything else, the new publisher appends
+={"event":"rename","file":NEW,"from":OLD}= (both mapped), so the
+sandbox learns the new name.
+
+*Shared shell sessions.* devops.el names sessions by target
+(=devops:web-1 /ssh:web-1:=), so two workbooks on the same target share
+a shell. The feed is per run and leaks nothing, but shell state (cwd,
+exported variables) carries over between workbooks in different
+sandboxes. The README says so; per-workbook session names are later
+work.
 
 ** The feed
 
 #+begin_example
 FEED/
-  status.json         devops-mode, execution-log, exporter heartbeat
+  status.json         workbook, Emacs server, devops-mode, publisher heartbeat
   events.jsonl        the log lines, paths mapped, appended in order
-  outputs/<id>.json   run-output answer, one file per finished async run
-  outputs/<file>@<line>.json   latest output of a sync block (see Open questions)
+  outputs/<id>.json   run-output answer, one file per finished run
 #+end_example
 
-Rules for the exporter:
+Rules for the publisher:
 
+0. *Its workbook only.* Lines whose =file= is not the attached
+   workbook are dropped before anything else, and output is asked only
+   for runs that pass. Lines with no =file= are dropped.
 1. *Output before event.* Write =outputs/<id>.json= first, append the
    =result done= line to =events.jsonl= after. A consumer that sees the
    event can read the output at once, so there is no =not-found= retry.
 2. *Atomic.* Write to =.tmp=, rename. =events.jsonl= is append-only.
-3. *Heartbeat.* =status.json= carries =exporter-time=, refreshed
+3. *Heartbeat.* =status.json= carries =publisher-time=, refreshed
    every few seconds, so the sandbox can tell a quiet log from a dead
-   exporter.
+   publisher. It also names the =workbook= (mapped path) and the Emacs
+   =server=, so the sandbox can say whose feed it reads. It does not
+   carry =execution-log=: the log's path is the host's business.
 4. *Path mapping.* =--map HOST=SANDBOX= rewrites =file= (and =buffer=
    stays). Log paths are host paths; a sandbox that mounts elsewhere
-   still resolves =follow --dir= and =output FILE LINE=. Same absolute
+   still resolves the workbook in =status=, =follow= and =modified=. Same absolute
    path (no =--map=) remains the easy case for containers.
+5. *Outputs are JSON.* =outputs/<id>.json= is the =run-output= answer
+   exactly as host mode prints it (={session, status, id, input,
+   output}=). Feed mode prints the file as is, so both modes give the
+   same shape and the skill does not need a separate path for feed mode.
+   One file carries status and output together, so one rename keeps it
+   atomic. For grep in the sandbox: =jq -r .output outputs/ID.json=.
+
+*** Unsaved edits: devops.bb logs them, in cljbang
+
+"This buffer has unsaved edits" flows host → sandbox like everything
+else, so it can go in the feed. devops.el stays focused on running
+org-babel blocks on remote targets; devops.bb ships the hooks instead,
+as =emacs/devops/bb/edits.clj=, which the operator loads with cljbang
+and turns on with =devops-bb-edits-mode=. For org buffers visiting a
+file, while =devops-mode= is on and =devops-execution-log= is set:
+
+- =first-change-hook= → ={"event":"modify","file":…}=
+- =after-save-hook= → ={"event":"save","file":…}= (the auto-save on block
+  execution emits this too)
+- =after-revert-hook= → ={"event":"revert","file":…}= (the buffer is
+  clean again, so a =modify= follows on the next change)
+- =kill-buffer-hook=, when the buffer still has unsaved edits →
+  ={"event":"kill","file":…}= (the edits are gone)
+
+They go through =devops-log-append=, into the same log with the same
+header (=time=, =event=, =file=, =buffer=). The publisher passes them
+through with the other events. No polling.
 
 ** Sinks: where the feed goes
 
-One verb, =put(path, bytes)=, and one option, =--via=:
+Two verbs, =put(path, bytes)= (replace atomically; =path= is relative
+to =--to=) and =append(line)= (one JSON line, always appended to
+=events.jsonl=), and one option, =--via=:
 
 | Sink                  | Flags                                          |
 |-----------------------+------------------------------------------------|
@@ -135,14 +215,21 @@ One verb, =put(path, bytes)=, and one option, =--via=:
 | container (no mount)  | =--via "docker exec -i box" --to /feed=        |
 | Tailscale / SSH node  | =--via "ssh node" --to /home/me/feed=          |
 
-With =--via CMD=, a put runs =CMD sh -c 'cat > F.tmp && mv F.tmp F'=
-(append: =cat >> F=). Anything that runs a command somewhere fits:
-=ssh=, =tailscale ssh=, =docker exec -i=, =podman exec -i=, =kubectl
-exec -i=. No TRAMP re-implementation; the operator's own ssh config and
-Tailscale ACLs decide who may be reached.
+With =--via CMD= and =--to TO=, =put= runs =CMD sh -c 'cat > F.tmp &&
+mv F.tmp F'= (=F= is =TO/path=) and =append= runs =CMD sh -c 'cat >>
+TO/events.jsonl'=. Anything that runs a command somewhere fits: =ssh=,
+=tailscale ssh=, =docker exec -i=, =podman exec -i=, =kubectl exec -i=.
+No TRAMP re-implementation; the operator's own ssh config and Tailscale
+ACLs decide who may be reached.
 
 Why push, not pull: a pull would give the sandbox a way into the host.
 Push needs host → sandbox access only, which the operator already has.
+
+The sink flags are given to =devops-bb-sandbox-attach=, which adds
+=--server= and =--file=. Run by hand, =publish= needs all of them; there
+is no default workbook.
+
+---
 
 ** Consumer: feed mode
 
@@ -151,47 +238,58 @@ Push needs host → sandbox access only, which the operator already has.
 - =status=: =status.json=. =follow=: tail =events.jsonl=.
   =run-output ID=: =outputs/ID.json=, or the =not-found= answer shape.
   =run-output= checks ID is a UUID (no path traversal).
-- =output FILE LINE=: sync blocks only, from =outputs/<file>@<line>.json=
-  (or dropped; see Open questions).
-- =sessions=, =modified=, =revert=, =tools=, =drift=, =dashboard's
-  Emacs views=: fail with ="needs Emacs, which this sandbox cannot reach"=.
-  Dropped on purpose; the operator is the channel for them.
-- =follow= in feed mode warns once when =exporter-time= is stale.
+- =status= names the workbook. =follow= needs no =--dir=: every event
+  is the workbook's.
+- =modified=: =true= when the last =modify= / =save= / =revert= /
+  =kill= event in =events.jsonl= is a =modify=. =FILE=, if given, must
+  be the workbook, or it fails with ="not this sandbox's workbook"=. It is a check, not a lock: the operator
+  can start typing between check and write. Emacs still catches that and
+  warns on the next edit that the file changed on disk.
+- =output=, =sessions=, =revert=, =tools=, =drift=, =dashboard's Emacs views=: fail
+  with ="needs Emacs, which this sandbox cannot reach"=. Dropped on
+  purpose; the operator is the channel for them.
+- =follow= in feed mode warns once when =publisher-time= is stale.
+
+** Caveats
+
+Sandboxed workbooks are async only (=:results output=, set in the
+workbook's =header-args=). Only an async run has an =id= and a
+=result= line, so only it reaches the sandbox with output. The
+publisher passes a sync =execute= line (no =id=) through with
+="output":null= added; =follow= shows it, and the skill asks the
+operator to make the block async and run it again.  No
+=outputs/<file>@<line>.json=, and =output FILE LINE= is not in feed
+mode.
 
 ** Not in scope (v1)
 
-- Any channel from sandbox to host (no write-back, no "modified" flag).
-  Rule stays: operator saves the workbook before Claude writes it, and
-  reverts the buffer afterwards.
+- Any channel from sandbox to host (no write-back). Claude checks
+  =modified= before it writes; =revert= is replaced by
+  =global-auto-revert-mode= on the host, which reloads an unmodified
+  buffer once Claude's write lands (mount, git/rsync, or TRAMP with
+  =auto-revert-remote-files=). The README recommends it.
 - Getting the *workbook* to a remote sandbox. Name the three ways
   (mount, git, TRAMP) in the README; do not build sync.
 - Redaction of secrets in output. The feed holds what Emacs holds.
   Claude does not quote credentials (as before); =bb scan= hooks stay.
-
-** Open questions
-
-1. *Sync blocks.* They log =execute= with no id and no =result=. Is the
-   line written before or after the block finishes? (Step 2 finds out.)
-   If after: exporter calls =output FILE LINE= on the =execute= line and
-   keys by =file@line=. If before: poll with backoff, or tell operators
-   to use =:results output= (async) in sandboxed workbooks. The latter
-   is simpler and I lean to it.
-2. *Several sandboxes at once.* Allowed: one =export= process per sink.
-   Each tails the log independently. Nothing shared.
-3. *Replay.* A new sandbox starts empty (follow starts "from now"). Do we
-   want =--since= to seed =events.jsonl= with recent history? Probably
-   =export --backfill N= for the last N events.
-4. *Dashboard.* Works on the feed for the feed view; the detail view
-   needs Emacs. Leave as is in v1.
-5. *Name.* =export= vs =feed= vs =publish=.
+- *Replay.* A new sandbox starts empty (follow starts "from now"). No
+  =--since= to seed =events.jsonl= with recent history.
+- Secret redaction
 
 ** Done when
 
-- =devops-bb export --dir D --to FEED= on the host fills a feed as the
-  operator runs blocks.
+- =devops-bb publish --server S --file W --to FEED= on the host fills a
+  feed with W's events only, as the operator runs blocks in W and in
+  other workbooks.
+- =devops-bb-sandbox-attach= in two workbook buffers of one Emacs gives
+  two feeds, neither holding the other's events; killing a buffer stops
+  its publisher; renaming its file keeps the feed, with a =rename= event
+(if the spike in step 3b works). devops.el is unchanged.
 - With =DEVOPS_BB_FEED=FEED= and *no Emacs reachable* (no socket, no
-  =emacsclient= on PATH), =status=, =follow= and =run-output= answer, and
-  the others fail with the message above.
+  =emacsclient= on PATH), =status=, =follow=, =run-output= and =modified=
+  answer, and the others fail with the message above.
+- =devops-bb-edits-mode= (cljbang, =emacs/devops/bb/edits.clj=) logs
+  =modify=, =save=, =revert= and =kill= events; devops.el is unchanged.
 - The same feed works for: a local dir, a container with a ro mount,
   a container with =--via "docker exec -i"=, and a Tailscale node with
   =--via "ssh node"=.
@@ -200,16 +298,19 @@ Push needs host → sandbox access only, which the operator already has.
 - =skills/devops-bb/SKILL.md= and README describe feed mode and its
   limits.
 - The infra-devcontainer workbook shrinks to =.devcontainer= config and
-  a =devops-bb export= line.
+  a =devops-bb publish= line.
 
 ** Code map
 
 | File                         | Change                                              |
 |------------------------------+-----------------------------------------------------|
-| =src/devops/bb/feed.clj=     | new: feed layout, =put=, reading a feed (pure-ish)  |
-| =src/devops/bb/export.clj=   | new: tail log → outputs → events, heartbeat         |
-| =src/devops/bb/cli.clj=      | feed mode switch in each command; =export= command  |
-| =bb.edn=                     | task =export=                                       |
+| =src/devops/bb/feed.clj=     | new: feed layout, =put=, =append=, reading a feed (pure-ish)  |
+| =src/devops/bb/publish.clj=  | new: tail log → filter to =--file= → outputs → events, heartbeat |
+| =src/devops/bb/cli.clj=      | feed mode switch in each command; =publish= command  |
+| =emacs/devops/bb/edits.clj=  | new, cljbang in the operator's Emacs: =modify= / =save= / =revert= / =kill= log lines |
+| =emacs/devops/bb/sandbox.clj= | new, cljbang: =devops-bb-sandbox-attach= / =-detach=, one publisher child process per buffer, restart on rename |
+| =src/devops/bb/emacs.clj=    | =emacsclient -s= when a server is given             |
+| =bb.edn=                     | task =publish=                                       |
 | =skills/devops-bb/SKILL.md=  | "Sandbox / feed mode" section                       |
 | =README.md=                  | same, plus the sinks table                          |
 
@@ -272,6 +373,8 @@ jq -c 'select(.event=="execute" and (.id==null)) | {line,status,error}' ~/.cache
 
 ** TODO 2. Sync block: when is it logged?                           :local:
 
+Not needed: sandboxed workbooks are async only (Open question 1).
+
 Open question 1. Run the block below (it is sync: no =:results output=),
 then look at the log. The =sleep= makes "before or after" visible: if
 the =execute= line's time is ~3s before the next log line or before
@@ -300,6 +403,14 @@ tail -n 4 ~/.cache/devops/executions.jsonl | jq -M -c '{time,event,status,line,i
 bb test 2>&1 | tail -n 5
 #+end_src
 
+** TODO 3b. Spike: see a rename from a buffer-local hook            :local:
+
+Can =sandbox.clj= notice that an attached buffer's file was renamed
+with no devops.el change? Try a buffer-local hook or watcher that fires
+on =set-visited-file-name= and on a denote rename, and gives the old
+and new path. If neither fires for both, fall back to "re-attach after
+a rename" for v1.
+
 ** TODO 4. Check the sandboxes you will demo with                   :local:
 
 #+begin_src sh
@@ -308,7 +419,9 @@ tailscale status 2>&1 | head -n 5
 #+end_src
 
 ** TODO 5. Feed reader and consumer mode
-** TODO 6. =export= with a local directory sink
+** TODO 6. =publish= with a local directory sink
+Filtered to one workbook, while blocks run in another.
+** TODO 6b. =devops-bb-sandbox-attach=: two buffers, kill, rename
 ** TODO 7. =--via= sink; try ssh to a tailnet node
 ** TODO 8. Container: ro mount, then =docker exec -i=
 ** TODO 9. Skill, README, tests
