@@ -39,12 +39,21 @@ Claude Code runs in a *sandbox* and still works the devops-bb loop:
 - it writes and edits its one workbook;
 - the operator runs the blocks in Emacs, on the host;
 - Claude follows each run and reads its output;
-- it *never* executes anything on the servers, and holds nothing that
-  could reach the host's Emacs or the servers.
+- it *never* uses a credentialed resource itself, and holds nothing
+  that could reach the host's Emacs, servers, or other credentialed
+  tools.
 
-This is the loop for all development, not only incidents: targets are
-servers, other checked-out projects, ephemeral instances, and Claude
-writes code next to the workbook as well as blocks.
+A *credentialed resource* is anything the operator can reach and Claude
+must not: a server over ssh, a CLI with a profile or token (=aws
+--profile prod=, =kubectl --context=, =gh=, =psql=), git with push
+access. A target is a credential, not only a host. The workbook is the
+one way to use them, each use reviewed by the operator.
+
+*Anything that needs no credential, Claude does itself, in the
+sandbox*: edit code, =bb test=, a REPL, lint, build, =grep=. Only the
+credentialed step goes through a block. This is the loop for all
+development, not only incidents: repos, other checked-out projects,
+ephemeral instances.
 
 #+begin_src mermaid :file "spec.png" :scale 2 
 flowchart LR
@@ -55,22 +64,25 @@ flowchart LR
     pub["devops-bb publish<br/>child process"]
   end
 
-  servers["Servers"]
+  servers["Credentialed resources<br/>servers, user CLIs, git origin"]
 
   subgraph sbx["Sandbox (container / tailnet node / confined process)"]
     claude["Claude Code"]
     cli["devops-bb<br/>feed mode"]
     feed[("feed<br/>status.json<br/>events.jsonl<br/>outputs/ID.json")]
-    wb[/"workbook dir<br/>.org + code"/]
+    wb[/"workbook dir<br/>.org, files, bundle"/]
+    repo[("repo clone<br/>edit, test, commit")]
   end
 
-  emacs -- "operator runs blocks" --> servers
+  emacs -- "operator runs blocks<br/>ssh, CLIs, git push" --> servers
   emacs -- "emit" --> log
   emacs -- "emit, its buffer only" --> sub
   sub -- "events + output, stdin" --> pub
   pub == "push, one way (--to / --via)" ==> feed
   feed --> cli --> claude
-  claude -- "writes blocks + code" --> wb
+  claude -- "writes blocks" --> wb
+  claude -- "works freely" --> repo
+  repo -- "git bundle" --> wb
   wb -- "mount / rsync pull" --> emacs
   claude -. "no path" .-x servers
 #+end_src
@@ -133,14 +145,52 @@ Ways in, and what closes each:
 | =:var x=(elisp)=, =#+PROPERTY header-args=, noweb      | prompt shows processed params, expanded body |
 | =#+TARGET=, static or dynamic                         | prompt shows resolved target; change re-prompts |
 | =analyze.py=, =bb.edn= run by an approved block        | the workbook dir is in the fingerprint     |
+| commits, pushed by an approved block                  | bundle SHAs in the fingerprint; prompt shows the log (Code) |
+| a malicious repo config or hook                       | the host never runs git in Claude's repo; bundle only |
 | =# Local Variables:= / =eval:=                        | =hack-local-variables= advice              |
 | =.dir-locals.el=, =.git/= (=core.fsmonitor=), =.envrc=, symlinks | dir check suspends the buffer     |
 | a symlinked feed dir on an ssh node                   | =feed= user, symlink refusal (Sinks)       |
 | (on the node) the operator's forwarded ssh-agent      | =--ssh= forces forwarding off (Sinks)      |
 | (on the node) a direct route to the servers           | tailnet ACL, checked in step 4             |
+| (in the sandbox) a credential                         | none provisioned: no =~/.ssh= keys, =~/.aws=, =gh= token, origin creds; checked in step 4 |
+| =#+TARGET: x /aws:prod-admin:=, any profile the operator has | every scheme must have =:allow=; attach and each run refuse otherwise (Review) |
 
 Feed output is server output, and may carry injected text; the skill
 tells Claude to treat it as data, not instructions.
+
+** Code: the repo lives in the sandbox
+
+Developing in an existing repo, aly-clojure say, does not put the repo
+in the workbook dir: its dot-paths (=.git=, =.github=, =.clj-kondo=)
+would suspend it, hashing =target/= on every confirm is slow, and the
+operator would be approving =bb test=, which needs no credential.
+
+- *Claude's own clone, in the sandbox.* Inside the container (or a
+  separate rw mount, never the workbook dir), or on the node. Claude
+  edits, tests and commits there freely.
+- *Seeded from the host.* A block the operator runs makes =git bundle
+  create WB/<repo>.bundle --all= in the host checkout; Claude clones
+  from the bundle. The sandbox never needs read credentials for
+  origin.
+- *Back as a bundle.* Claude runs =git bundle create
+  /work/<repo>.bundle origin/main..HEAD= into the workbook dir; the
+  mount or pull brings it. A bundle is a regular file, which the dir
+  check allows, and pure objects and refs: no config, no hooks, no
+  =fsmonitor=. The host never runs git inside a repo Claude controls,
+  and Claude never gets the host's working tree.
+- *Fetched into a namespace.* =git -c transfer.fsckObjects=true fetch
+  WB/<repo>.bundle 'refs/heads/*:refs/sandbox/*'= in the host
+  checkout, never into =refs/heads=.
+- *Reviewed at push.* The credentialed step is a block: =git push
+  origin refs/sandbox/feature:refs/heads/feature=, or =gh pr create=.
+  The fingerprint includes the bundle's commit SHAs, so a new bundle
+  re-prompts, and a notice shows =git log --stat
+  origin/main..refs/sandbox/feature=. Code is reviewed as commits when
+  it leaves, not as a dir diff on every run.
+
+The workbook dir stays small: the =.org=, =:file= outputs, bundles,
+and the occasional script a block runs. Its whole-dir fingerprint
+(Review) covers only that.
 
 ** Review: confirming each run
 
@@ -184,6 +234,18 @@ instances. devops.el binds a public =devops-resolving-target=, =(TAG
 target's block is fingerprinted like any other; its *output* is not
 trusted that way: it is part of the main block's fingerprint, so a new
 instance re-prompts every block under that heading once.
+
+*Scheme targets* (devops.el's =devops-target-schemes=, =/aws:prod:=)
+are credentials. The prompt and the fingerprint use
+=devops-target-env=: =target /aws:prod: · AWS_PROFILE=prod · unset
+AWS_ACCESS_KEY_ID …=. In an attached buffer *every scheme must have
+=:allow=*: without one, Claude can name any profile the operator
+has. Attach refuses when any entry of =devops-target-schemes= lacks
+=:allow=, since Claude can add a =#+TARGET= at any time; and the
+confirm function refuses a run whose resolved target is a scheme
+without =:allow=, since the map can change after attach: "scheme =aws=
+has no :allow; a sandboxed workbook may only name allowed credentials".
+devops.el's own =:allow= check then rejects an ARG outside the list.
 
 *State lives in a global registry*, ={base-buffer → attachment}=, not
 in buffer-locals: =M-x revert-buffer= runs =normal-mode=, which kills
@@ -277,7 +339,8 @@ edits sends its =kill= event before stdin closes. Attaching a buffer
 that is already attached asks to replace its sink.
 
 Attach refuses when =ob-confirm-posframe-mode= is off, when
-=buffer-file-name= is remote, or when the dir check fails (Review). It
+=buffer-file-name= is remote, when the dir check fails, or when a
+scheme in =devops-target-schemes= has no =:allow= (Review). It
 warns when the workbook's dir holds other =.org= files: one dir per
 workbook.
 
@@ -542,6 +605,10 @@ the block captures it. =output FILE LINE= is not in feed mode.
   suspends the buffer; =:file ../x= is refused.
 - A sync block's =#+RESULTS= reaches the sandbox as an output.
 - A run from an indirect buffer reaches its base buffer's feed.
+- aly-clojure end to end: the host seeds a bundle, Claude clones,
+  edits, runs =bb test= and bundles back in the sandbox, the host
+  fetches into =refs/sandbox/*=, and the push block prompts with the
+  commit log; a new bundle re-prompts it.
 - =devops-bb-sandbox-attach= in two workbook buffers of one Emacs gives
   two feeds, neither holding the other's events, while blocks run in
   both. Killing a buffer stops its publisher after its =kill= event;
@@ -690,6 +757,18 @@ NODE=sandbox-node SERVER=web-1
 ssh -T -o ForwardAgent=no "$NODE" "nc -z -w 3 $SERVER 22 && echo REACHABLE || echo blocked"
 #+end_src
 
+No credential is provisioned in the sandbox either. Every line should
+say =none=:
+
+#+begin_src sh
+NODE=sandbox-node
+ssh -T -o ForwardAgent=no "$NODE" '
+  for f in ~/.ssh/id_* ~/.aws/credentials ~/.config/gh/hosts.yml ~/.kube/config ~/.git-credentials ~/.pgpass; do
+    [ -e "$f" ] && echo "FOUND $f" || echo "none $f"
+  done
+  [ -n "$SSH_AUTH_SOCK" ] && echo "FOUND agent $SSH_AUTH_SOCK" || echo "none agent"'
+#+end_src
+
 ** TODO 5. Does elisp in a header arg run before the prompt?        :local:
 
 Run the block and answer =n=. Then read the last lines of
@@ -725,10 +804,18 @@ for the new =spec.png=.
 From outside Emacs, as Claude would: change a block, change a file in
 the dir, plant =# Local Variables: eval: (message "pwned")= and revert
 both ways, plant =.git/= and a symlink. Expected: prompts with diffs, no
-"pwned", =sandbox: SUSPENDED=.
+"pwned", =sandbox: SUSPENDED=. With a scheme lacking =:allow=, attach
+refuses; remove =:allow= after attach and a run on that scheme is
+refused; =/aws:other:= outside =:allow= fails in devops.el.
 ** TODO 14. =--ssh= sink and pull, to a tailnet node
 =feed= user, symlink refusal, forwarding off. One command per result.
 Time a few runs with and without =ControlMaster=.
 ** TODO 15. Container: ro mount, then =docker exec -i=
-** TODO 16. Skill, README, tests
-** TODO 17. Trim the infra-devcontainer workbook
+** TODO 16. A repo in the sandbox: aly-clojure, seed, bundle back, push
+Seed with =git bundle create … --all=; fetch with =transfer.fsckObjects=
+into =refs/sandbox/*=; the push block's notice shows the log, and its
+fingerprint holds the bundle's SHAs.
+** TODO 17. Skill, README, tests
+The skill: do uncredentialed work yourself; write a block only for the
+credentialed step; bundle commits into the workbook dir.
+** TODO 18. Trim the infra-devcontainer workbook
