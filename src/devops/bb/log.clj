@@ -1,8 +1,8 @@
 (ns devops.bb.log
-  "Reading `devops-execution-log': one JSON line per thing the user did.
+  "Reading `devops-bb-execution-log': one JSON line per thing the user did.
 
   A line is a notification -- what happened and where -- and holds no
-  output; see devops-log.el.  This namespace only turns bytes into
+  output; see devops/bb/log.clj.  This namespace only turns bytes into
   event maps; what they mean together is devops.bb.model's job."
   (:require
    [cheshire.core :as json]
@@ -13,7 +13,7 @@
    [java.time.format DateTimeFormatter]))
 
 (def ^:private time-format
-  ;; devops-log.el writes `format-time-string "%FT%T%z"'
+  ;; devops/bb/log.clj writes `format-time-string "%FT%T%z"'
   (DateTimeFormatter/ofPattern "yyyy-MM-dd'T'HH:mm:ss[.SSS]Z"))
 
 (defn parse-time [s]

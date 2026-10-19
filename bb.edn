@@ -7,7 +7,7 @@
  {dashboard
   {:doc "Follow the devops.el execution log in a TUI"
    :exec-fn devops.bb.dashboard/run
-   :org.babashka/cli {:spec {:log {:desc "Execution log; default: devops-execution-log from Emacs"}}}}
+   :org.babashka/cli {:spec {:log {:desc "Execution log; default: devops-bb-execution-log from Emacs"}}}}
 
   status     {:doc "Is Emacs reachable, devops-mode on, and where does it log"
               :exec-fn devops.bb.cli/status}
@@ -27,6 +27,23 @@
               :exec-fn devops.bb.cli/tools}
   drift      {:doc "FILE [--heading H | --custom-id ID]: compare tangles with targets"
               :exec-fn devops.bb.cli/drift}
+
+  test-emacs
+  {:doc "Run the Emacs side's ERT tests; DEVOPS_EL and CLJBANG are its checkouts, default ../devops.el and ../cljbang.el"
+   :requires ([babashka.fs :as fs])
+   :task (let [root (fs/parent (fs/absolutize *file*))
+               dir (fn [env sibling]
+                     (str (or (System/getenv env) (fs/normalize (fs/path root ".." sibling)))))]
+           ;; Watchdog: batch ERT can hang on a prompt.  macOS has no `timeout'.
+           (shell "perl" "-e" "alarm shift; exec @ARGV" "300"
+                  "emacs" "--batch"
+                  "-L" (dir "DEVOPS_EL" "devops.el")
+                  "-L" (dir "CLJBANG" "cljbang.el")
+                  "-L" (str (fs/path root "emacs"))
+                  "-L" (str (fs/path root "emacs" "test"))
+                  "--eval" "(setq native-comp-enable-subr-trampolines nil)"
+                  "--eval" "(require 'devops-bb-test)"
+                  "--eval" "(ert-run-tests-batch-and-exit \"^devops-bb-\")"))}
 
   test
   {:doc "Run tests"

@@ -3,8 +3,9 @@
 devops.el from the command line, in [babashka](https://babashka.org).
 
 [devops.el](https://github.com/kpassapk/devops.el) runs org-babel blocks
-on remote targets and logs each run to `devops-execution-log`. devops.bb
-reads that log and asks the Emacs that wrote it what each run printed:
+on remote targets. devops.bb's Emacs side logs each run to
+`devops-bb-execution-log`; devops.bb reads that log and asks the Emacs
+that wrote it what each run printed:
 
 - `devops-bb dashboard`, a TUI that follows the log
 - `devops-bb output`, `follow`, `sessions`, … commands that print JSON
@@ -15,10 +16,9 @@ reads that log and asks the Emacs that wrote it what each run printed:
 Requires:
 
 - babashka
-- Emacs with an `emacsclient` server, devops.el with `devops-mode` on
-  and `devops-execution-log` set. `devops-bb run-output`, and the
-  dashboard's output for a past run, need `devops-scripting-run-output`
-  (devops.el `agentic-tools` branch).
+- Emacs with an `emacsclient` server, devops.el with `devops-mode` on,
+  and [cljbang](https://github.com/borkdude/cljbang.el), with this
+  repository's Emacs side loaded (below).
 - Optionally [cljbang-org](https://github.com/kpassapk/cljbang-org) in
   that Emacs, for the dashboard to show a block's heading and source.
 
@@ -29,6 +29,26 @@ runs from any directory:
 ln -s ~/src/github.com/kpassapk/devops.bb/bin/devops-bb ~/.local/bin/
 devops-bb status
 ```
+
+Load the Emacs side, and turn on the log:
+
+```emacs-lisp
+(add-to-list 'load-path "~/src/github.com/kpassapk/devops.bb/emacs")
+(require 'devops-bb)
+(setq devops-bb-execution-log "~/.cache/devops/executions.jsonl")
+(devops-bb-log-mode 1)
+```
+
+| File                            | Does                                                          |
+|---------------------------------|---------------------------------------------------------------|
+| `emacs/devops-bb.el`            | loads the two below                                           |
+| `emacs/devops-bb-scripting.el`  | noninteractive functions the commands call over `emacsclient` |
+| `emacs/devops/bb/log.clj`       | `devops-bb-log-mode`, in cljbang: writes the log              |
+
+`devops-bb-log-mode` writes a line when a block runs, when an async
+block's result arrives, when `devops-tangle` or `devops-drift` runs, and
+when an org buffer is first modified, saved, reverted, or killed with
+unsaved edits.
 
 ## Dashboard
 
@@ -52,14 +72,14 @@ devops-bb dashboard
 Newest first. With the cursor at the top, the feed follows new lines;
 further down, it stays on the event it is on.
 
-The log path comes from `devops-execution-log` in Emacs. Without Emacs,
+The log path comes from `devops-bb-execution-log` in Emacs. Without Emacs,
 pass it: `devops-bb dashboard --log ~/.cache/devops/executions.jsonl`.
 The feed works from the log alone; opening a block run needs Emacs.
 
 ⏎ opens the selected event. A block run is answered by Emacs, and
 nothing runs:
 
-- **output**: `devops-scripting-run-output`, by the run's session and
+- **output**: `devops-bb-scripting-run-output`, by the run's session and
   id, so it is that run's output even after the block ran again. If
   the session no longer holds the run, the block's latest run or its
   `#+RESULTS` is shown, and the view says so.
@@ -114,9 +134,7 @@ expanding `<<name()>>` references runs those blocks.
 
 `skills/devops-bb` teaches an agent the devops.el loop with these
 commands: it writes blocks, you run them, it follows the log and reads
-each run's output. It is the counterpart of devops.el's
-`skills/devops-el`, which does the same with `emacsclient --eval`.
-Install one of the two; they answer the same requests. For Claude Code:
+each run's output. For Claude Code:
 
 ```
 ln -s ~/src/github.com/kpassapk/devops.bb/skills/devops-bb ~/.claude/skills/
@@ -134,3 +152,6 @@ ln -s ~/src/github.com/kpassapk/devops.bb/skills/devops-bb ~/.claude/skills/
 | `devops.bb.dashboard` | the [charm.clj](https://github.com/kpassapk/charm.clj) loop |
 
 `bb test` runs the tests. The view tests compare whole screens as text.
+`bb test-emacs` runs the Emacs side's ERT tests in batch Emacs, with
+devops.el and cljbang.el from `../devops.el` and `../cljbang.el`, or
+from `DEVOPS_EL` and `CLJBANG`.

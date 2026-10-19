@@ -61,7 +61,7 @@ If it fails:
 |---|---|
 | `command not found: devops-bb` | Not on PATH. Ask the user to link `bin/devops-bb` from the devops.bb checkout onto PATH. |
 | `can't find socket` / `connection refused` | No Emacs server. Ask the user to run `M-x server-start`. |
-| `Cannot open load file ... devops` | devops.el isn't on the `load-path` of that Emacs. Ask the user how it is installed. |
+| `Cannot open load file ... devops` | devops.el, or devops.bb's `emacs/` directory, isn't on the `load-path` of that Emacs. Ask the user how it is installed. |
 | `Not an org buffer` | The file isn't org, or opened in another mode. |
 
 ## Writing blocks
@@ -220,8 +220,8 @@ it with `M-x devops-goto-session` on the block's heading.
 
 ## Following runs
 
-With `devops-mode` on and `devops-execution-log` set, Emacs appends a
-line to the log when the user runs a block, once more when an async
+With `devops-mode` and `devops-bb-log-mode` on and
+`devops-bb-execution-log` set, Emacs appends a line to the log when the user runs a block, once more when an async
 block's result arrives, and when the user runs `devops-tangle` or
 `devops-drift`. Watch it instead of waiting for the user to say "done".
 
@@ -231,9 +231,9 @@ Check first:
 devops-bb status
 ```
 
-If `devops-mode` is false or `execution-log` null, ask the user to turn
-on `devops-mode` and set `devops-execution-log` (e.g. `M-x
-customize-variable`). Don't turn it on yourself. Until it is on, wait for
+If `devops-mode` or `log-mode` is false or `execution-log` null, ask the
+user to turn on `devops-mode` and `devops-bb-log-mode` and set
+`devops-bb-execution-log` (e.g. `M-x customize-variable`). Don't turn it on yourself. Until it is on, wait for
 the user to say "done", then run `devops-bb output` on the blocks you
 wrote.
 

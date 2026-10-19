@@ -10,7 +10,7 @@
   (let [{:keys [events offset]} (log/read-from fixture 0)]
     (testing "skips lines that aren't JSON"
       (is (= [:execute :result :tangle :drift :tangle :execute] (map :event events))))
-    (testing "parses devops-log.el's time"
+    (testing "parses devops/bb/log.clj's time"
       (is (= 17 (.getMinute (:time (first events))))))
     (testing "nothing new past the end"
       (is (= [] (:events (log/read-from fixture offset)))))))

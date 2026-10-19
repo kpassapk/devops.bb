@@ -1,5 +1,5 @@
 (ns devops.bb.dashboard
-  "bb dashboard: follow `devops-execution-log', newest first, and open
+  "bb dashboard: follow `devops-bb-execution-log', newest first, and open
   an event to see what Emacs knows about it.
 
   The Elm loop of charm.clj: `update' turns a message into the next
@@ -157,7 +157,7 @@
         path       (some-> (or log from-emacs) fs/expand-home str)]
     (when-not path
       (binding [*out* *err*]
-        (println "No log: devops-execution-log is nil or Emacs is out of reach; pass --log PATH."))
+        (println "No log: devops-bb-execution-log is nil or Emacs is out of reach; pass --log PATH."))
       (System/exit 1))
     (let [state (init-state path (some? from-emacs))]
       (charm/run {:init       (fn [] [state (poll-cmd path (:offset state))])

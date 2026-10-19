@@ -32,12 +32,13 @@
 ;;; Commands
 
 (defn status
-  "Whether Emacs is reachable, devops-mode is on, and where it logs"
+  "Whether Emacs is reachable, devops-mode and devops-bb-log-mode are on, and where it logs"
   [_]
-  (answer "(progn (require 'devops)
+  (answer "(progn (require 'devops-bb)
              (list (cons :devops-mode (if (bound-and-true-p devops-mode) t :json-false))
-                   (cons :execution-log (and devops-execution-log
-                                             (expand-file-name devops-execution-log)))))"))
+                   (cons :log-mode (if (bound-and-true-p devops-bb-log-mode) t :json-false))
+                   (cons :execution-log (and devops-bb-execution-log
+                                             (expand-file-name devops-bb-execution-log)))))"))
 
 (defn output
   "What the src block at LINE of FILE printed: session, else #+RESULTS"
@@ -45,8 +46,8 @@
                       :coerce {:line :long}
                       :require [:file :line]}}
   [{:keys [file line tag]}]
-  (answer (format "(progn (require 'devops-scripting)
-                     (devops-scripting-block-output %s %d %s))"
+  (answer (format "(progn (require 'devops-bb-scripting)
+                     (devops-bb-scripting-block-output %s %d %s))"
                   (elisp-str (abs file)) line (elisp-opt tag))))
 
 (defn run-output
@@ -54,15 +55,15 @@
   {:org.babashka/cli {:args->opts [:id] :require [:id]}}
   [{:keys [id session]}]
   ;; Without SESSION, every live session is asked: an ID is unique.
-  (answer (format "(progn (require 'devops-scripting)
+  (answer (format "(progn (require 'devops-bb-scripting)
                      (let ((id %s) (session %s))
                        (if session
-                           (devops-scripting-run-output session id)
+                           (devops-bb-scripting-run-output session id)
                          (or (seq-some
                               (lambda (s)
-                                (let ((r (devops-scripting-run-output (alist-get :name s) id)))
+                                (let ((r (devops-bb-scripting-run-output (alist-get :name s) id)))
                                   (and (not (eq (alist-get :status r) :not-found)) r)))
-                              (devops-scripting-sessions))
+                              (devops-bb-scripting-sessions))
                              (list (cons :session nil) (cons :status :not-found)
                                    (cons :id id) (cons :input nil) (cons :output nil))))))"
                   (elisp-str id) (elisp-opt session))))
@@ -70,7 +71,7 @@
 (defn sessions
   "Every live async session: name, directory, state, prompt, id"
   [_]
-  (answer "(progn (require 'devops-scripting) (vconcat (devops-scripting-sessions)))"))
+  (answer "(progn (require 'devops-bb-scripting) (vconcat (devops-bb-scripting-sessions)))"))
 
 (defn modified
   "Whether Emacs holds unsaved edits to FILE: true, or false"
@@ -134,7 +135,7 @@
   "Print a line per new event in the execution log, for files under DIR"
   [{:keys [dir log json]}]
   (let [path (or (some-> log fs/expand-home str) (emacs/log-path)
-                 (fail "no log: devops-execution-log is nil or Emacs is out of reach; pass --log"))
+                 (fail "no log: devops-bb-execution-log is nil or Emacs is out of reach; pass --log"))
         dir  (str (fs/normalize (fs/absolutize (or dir "."))) "/")]
     (loop [offset (:offset (log/read-from path 0))]
       (let [{:keys [events offset]} (log/read-from path offset)]
