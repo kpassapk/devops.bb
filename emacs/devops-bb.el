@@ -29,6 +29,8 @@
 ;;                           `devops-bb-execution-log'; cljbang
 ;; - devops/bb/sandbox.clj   `devops-bb-sandbox-attach', which feeds a
 ;;                           workbook's runs to a sandbox; cljbang
+;; - devops-bb-review.el     the review of each run in an attached
+;;                           workbook, shown by ob-confirm-posframe
 ;;
 ;; Setup:
 ;;
@@ -36,12 +38,14 @@
 ;;   (require 'devops-bb)
 ;;   (setq devops-bb-execution-log "~/.cache/devops/executions.jsonl")
 ;;   (devops-bb-log-mode 1)
-;;   ;; A sandbox's feed, for M-x devops-bb-sandbox-attach:
+;;   ;; A sandbox's feed, for M-x devops-bb-sandbox-attach, which
+;;   ;; needs ob-confirm-posframe-mode for its review:
 ;;   (setq devops-bb-sandbox-sinks '(("box" :to "~/feeds/box")))
 
 ;;; Code:
 
 (require 'devops-bb-scripting)
+(require 'devops-bb-review)
 (require 'cljbang)
 
 (add-to-list 'cljbang-load-path
