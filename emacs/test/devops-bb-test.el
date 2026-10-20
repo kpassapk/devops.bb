@@ -987,13 +987,30 @@ Detach closes stdin and undoes the attach."
         (should (equal (mapcar (lambda (l) (alist-get 'event l)) (cdr lines))
                        '("modify" "execute" "revert")))))))
 
+(ert-deftest devops-bb-sandbox-attach-via-test ()
+  "A :via sink passes its command, and its :to as is, to the publisher."
+  (devops-bb-test--with-sandbox root
+    (devops-bb-test--sink root "v" :via "docker exec -i 'my box'")
+    (let ((buf (devops-bb-test--visit root "wb" devops-bb-test--elisp-block))
+          (args (expand-file-name "feeds/v/args" root)))
+      (with-current-buffer buf (devops-bb-sandbox-attach "v" "wb"))
+      (should (devops-bb-test--wait (lambda () (file-exists-p args))))
+      (should (equal (split-string (with-temp-buffer
+                                     (insert-file-contents args)
+                                     (buffer-string))
+                                   "\n" t)
+                     (list "--to" (expand-file-name "feeds/v" root)
+                           "--via" "docker exec -i 'my box'"
+                           "--name" "wb")))
+      (devops-bb-test--detach buf))))
+
 (ert-deftest devops-bb-sandbox-attach-refuses-test ()
   "Attach refuses without ob-confirm-posframe-mode, a remote file, a sink
 in use or not supported; asks before replacing; warns of other .org files."
   (devops-bb-test--with-sandbox root
     (devops-bb-test--sink root "a")
     (devops-bb-test--sink root "b")
-    (devops-bb-test--sink root "c" :via "docker exec -i box")
+    (devops-bb-test--sink root "c" :ssh "feed@node")
     (let ((one (devops-bb-test--visit root "one" devops-bb-test--elisp-block))
           (two (devops-bb-test--visit root "two" devops-bb-test--elisp-block))
           (warnings nil))

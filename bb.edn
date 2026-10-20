@@ -28,7 +28,7 @@
               :exec-fn devops.bb.cli/tools}
   drift      {:doc "FILE [--heading H | --custom-id ID]: compare tangles with targets"
               :exec-fn devops.bb.cli/drift}
-  publish    {:doc "--to DIR [--map HOST=SANDBOX] [--max-lines N] [--max-bytes N] [--name N]: stdin to a sandbox's feed"
+  publish    {:doc "--to DIR [--via CMD] [--map HOST=SANDBOX] [--max-lines N] [--max-bytes N] [--name N]: stdin to a sandbox's feed"
               :exec-fn devops.bb.cli/publish}
 
   test-emacs
