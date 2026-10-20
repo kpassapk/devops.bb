@@ -106,6 +106,15 @@
       (is (= {:session nil :status "done" :id id1 :input "(+ 1 2)" :output "3"}
              (json/parse-string (:output it) true)))
       (is (not (contains? (json/parse-string (:event it) true) :input)))))
+  (testing "an output Emacs cut roughly keeps the full sizes Emacs sent"
+    (let [it (publish/item {:event "result" :id id1
+                            :output {:status "done" :id id1 :output (numbered 2000)
+                                     :truncated true :lines 9000 :bytes 123456}}
+                           1 (assoc publish/defaults :maps []))
+          a  (json/parse-string (:output it) true)]
+      (is (:truncated a))
+      (is (= [9000 123456] [(:lines a) (:bytes a)]))
+      (is (= 501 (count (str/split-lines (:output a)))))))
   (testing "an output whose id is not a UUID is dropped, never a path"
     (binding [*err* (java.io.StringWriter.)]
       (is (nil? (:output (publish/item {:event "result" :id "../../x" :output "boom"} 1

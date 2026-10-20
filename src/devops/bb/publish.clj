@@ -123,7 +123,9 @@
 
 (defn- answer
   "The run-output answer for entry E, whose :output is the answer or
-  its text; :output capped.  Nil when E carries no output."
+  its text; :output capped.  Nil when E carries no output.  An answer
+  Emacs already cut short, with its rough head/tail cap, says so with
+  :truncated and the full :lines and :bytes, which are kept."
   [e opts]
   (let [o (:output e)
         a (cond (map? o)    o
@@ -136,7 +138,8 @@
                            :id      (or (:id a) (:id e))
                            :input   (:input a)
                            :output  (when (some? (:output a)) output))
-          truncated (assoc :truncated true :lines lines :bytes bytes))))))
+          truncated      (assoc :truncated true :lines lines :bytes bytes)
+          (:truncated a) (assoc :truncated true :lines (:lines a) :bytes (:bytes a)))))))
 
 (defn item
   "What the writer pushes for entry E, numbered SEQ:
