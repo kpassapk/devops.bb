@@ -10,6 +10,20 @@
 (require 'devops-bb)
 (require 'devops-drift)
 
+(defconst devops-bb-test--posframe-stub
+  '(unless (require 'posframe nil t)
+     (defun posframe-workable-p () nil)
+     (defun posframe-show (&rest _) nil)
+     (defun posframe-hide (&rest _) nil)
+     (defun posframe-poshandler-frame-center (&rest _) '(0 . 0))
+     (provide 'posframe))
+  "Stand in for posframe, which ob-confirm-posframe requires, when it is
+not on the load path.  A batch Emacs shows no posframe anyway: the
+prompt goes to a side window.")
+
+(eval devops-bb-test--posframe-stub t)
+(require 'ob-confirm-posframe)
+
 (devops-mode 1)
 (devops-bb-log-mode 1)
 
@@ -823,21 +837,46 @@ its stdin in DIR/stdin.  AFTER, sh, runs once stdin closes."
                 " && cat >> \"$2/stdin\"" (when after (concat "; " after)))
         "fake-publish"))
 
+(defvar devops-bb-test--prompts nil
+  "The prompts shown in a test, newest first: (NAME PREVIEW NOTICES PARAMS).
+PARAMS is the header-argument line, in full: the preview cuts it.")
+
+(defvar devops-bb-test--answers nil
+  "The keys to answer the next prompts with, in order; then y.")
+
+(defun devops-bb-test--answer (info &optional notices)
+  "Answer the prompt for INFO, for `ob-confirm-posframe--read-answer'.
+Record it, with the preview it shows and its NOTICES."
+  (push (list (nth 4 info)
+              (with-current-buffer ob-confirm-posframe--buffer
+                (buffer-substring-no-properties (point-min) (point-max)))
+              (mapcar #'substring-no-properties notices)
+              (substring-no-properties (ob-confirm-posframe--param-line info)))
+        devops-bb-test--prompts)
+  (or (pop devops-bb-test--answers) ?y))
+
 (defmacro devops-bb-test--with-sandbox (root-var &rest body)
   "Run BODY with ROOT-VAR a temp dir for workbooks and their feeds.
-The fake publisher, no sinks yet, `ob-confirm-posframe-mode' on and no
-execution log.  Afterwards every buffer is detached and every buffer
-visiting a file under ROOT-VAR killed."
+The fake publisher, no sinks yet, `ob-confirm-posframe-mode' on, its
+prompts answered by `devops-bb-test--answer', and no execution log.
+Afterwards every buffer is detached and every buffer visiting a file
+under ROOT-VAR killed."
   (declare (indent 1))
   `(let* ((,root-var (file-name-as-directory
                       (file-truename (make-temp-file "devops-sandbox-" t))))
           (devops-bb-sandbox-sinks nil)
           (devops-bb-sandbox-publish-command (devops-bb-test--fake-publish))
-          (ob-confirm-posframe-mode t)
           (devops-bb-execution-log nil)
-          (org-confirm-babel-evaluate nil))
+          (org-confirm-babel-evaluate nil)
+          (devops-bb-test--prompts nil)
+          (devops-bb-test--answers nil)
+          (posframe-was ob-confirm-posframe-mode))
+     (ob-confirm-posframe-mode 1)
      (unwind-protect
-         (progn ,@body)
+         (cl-letf (((symbol-function 'ob-confirm-posframe--read-answer)
+                    #'devops-bb-test--answer))
+           ,@body)
+       (unless posframe-was (ob-confirm-posframe-mode -1))
        (devops-bb-sandbox--on-kill-emacs)
        (let ((kill-buffer-query-functions nil))
          (dolist (buf (buffer-list))
@@ -911,6 +950,7 @@ Detach closes stdin and undoes the attach."
         (devops-bb-sandbox-attach "a" "my-feed")
         (should (devops-bb-sandbox-attachment))
         (should backup-by-copying)
+        (should (local-variable-p 'create-lockfiles))
         (should (string-match-p "sandbox: my-feed" (devops-bb-sandbox--mode-line)))
         (should (member devops-bb-sandbox--mode-line-entry mode-line-misc-info))
         (should (equal (devops-bb-test--run-block) 3))
@@ -919,6 +959,7 @@ Detach closes stdin and undoes the attach."
         (devops-bb-test--detach buf)
         (should-not (devops-bb-sandbox-attachment))
         (should-not (local-variable-p 'backup-by-copying))
+        (should-not (local-variable-p 'create-lockfiles))
         (should-not (devops-bb-sandbox--mode-line))
         (should-not (memq 'devops-bb-sandbox--on-kill-buffer kill-buffer-hook)))
       (should (equal (split-string (with-temp-buffer
@@ -1189,13 +1230,16 @@ the run and `attached' false."
             `(progn
                (setq load-path ',load-path
                      native-comp-enable-subr-trampolines nil)
+               ,devops-bb-test--posframe-stub
                (require 'devops-bb)
+               (require 'ob-confirm-posframe)
+               (ob-confirm-posframe-mode 1)
+               (fset 'ob-confirm-posframe--read-answer (lambda (&rest _) ?y))
                (devops-mode 1)
                (devops-bb-log-mode 1)
                (setq devops-bb-sandbox-sinks '(("local" :to ,feed))
                      devops-bb-sandbox-publish-command
                      '(,(expand-file-name "bin/devops-bb" devops-bb-test--repo) "publish")
-                     ob-confirm-posframe-mode t
                      org-confirm-babel-evaluate nil)
                (with-current-buffer (find-file-noselect ,file)
                  (devops-bb-sandbox-attach "local" "wb")
@@ -1232,6 +1276,432 @@ the run and `attached' false."
                                            (format "outputs/%s.json" (alist-get 'id run))
                                            feed))))
                          "3")))))))
+
+;;; Review
+
+(defvar devops-bb-test--pwned nil
+  "Set by the elisp a test plants, which must never run.")
+
+(defvar devops-bb-test-local nil
+  "A local variable a test plants.")
+(put 'devops-bb-test-local 'safe-local-variable #'integerp)
+
+(defun devops-bb-test--claude-writes (file text)
+  "Write TEXT to FILE behind Emacs's back, as Claude does in the sandbox.
+Its time is a few seconds on, so auto-revert sees the change."
+  (make-directory (file-name-directory file) t)
+  (write-region text nil file nil 'silent)
+  (set-file-times file (time-add (current-time) 5)))
+
+(defun devops-bb-test--execute-at (regexp)
+  "Run what is at the first match of REGEXP, as C-c C-c does.
+Return a src block's value."
+  (goto-char (point-min))
+  (re-search-forward regexp)
+  (goto-char (match-beginning 0))
+  (if (org-element-type-p (org-element-context) 'src-block)
+      (org-babel-execute-src-block)
+    (org-babel-execute-maybe)))
+
+(defun devops-bb-test--prompt-names ()
+  "The names of the blocks prompted for, oldest first."
+  (mapcar #'car (reverse devops-bb-test--prompts)))
+
+(defun devops-bb-test--notices ()
+  "The notices of the last prompt."
+  (nth 2 (car devops-bb-test--prompts)))
+
+(defmacro devops-bb-test--with-workbook (spec &rest body)
+  "Run BODY in an attached workbook, in a sandbox: SPEC is (ROOT BUF TEXT).
+ROOT is the sandbox's temp dir, BUF the buffer of ROOT/wb/wb.org, which
+starts as TEXT and is attached to the sink \"a\"."
+  (declare (indent 1))
+  (let ((root (nth 0 spec)) (buf (nth 1 spec)) (text (nth 2 spec)))
+    `(devops-bb-test--with-sandbox ,root
+       (devops-bb-test--sink ,root "a")
+       (let ((,buf (devops-bb-test--visit ,root "wb" ,text)))
+         (ignore ,buf)
+         (with-current-buffer ,buf
+           (devops-bb-sandbox-attach "a" "wb")
+           ,@body)))))
+
+(defconst devops-bb-test--named-block
+  "* Run\n\n#+name: sum\n#+begin_src emacs-lisp\n(+ 1 2)\n#+end_src\n"
+  "A workbook with one named sync block.")
+
+(ert-deftest devops-bb-review-confirm-test ()
+  "An unchanged block the operator confirmed and ran runs without a
+prompt.  A block Claude changed, or a file Claude wrote beside it,
+prompts once, with the diff; `d' shows all of it."
+  (devops-bb-test--with-workbook (root buf devops-bb-test--named-block)
+    (let ((file (buffer-file-name)) seen)
+      (should (equal (devops-bb-test--execute-at "begin_src") 3))
+      (should (equal (devops-bb-test--prompt-names) '("sum")))
+      (should (member "not run since attach" (devops-bb-test--notices)))
+      (devops-bb-test--execute-at "begin_src")
+      (should (= 1 (length devops-bb-test--prompts)))
+      ;; Claude edits the block.
+      (devops-bb-test--claude-writes
+       file (replace-regexp-in-string "(\\+ 1 2)" "(+ 1 3)" devops-bb-test--named-block))
+      (revert-buffer t t)
+      (setq devops-bb-test--answers '(?d ?y))
+      (cl-letf (((symbol-function 'recursive-edit)
+                 (lambda () (setq seen (buffer-string)))))
+        (should (equal (devops-bb-test--execute-at "begin_src") 4)))
+      (should (= 3 (length devops-bb-test--prompts)))
+      (should (member "changed since you ran it: +1/-1" (devops-bb-test--notices)))
+      (should (string-match-p "^-(\\+ 1 2)$" seen))
+      (should (string-match-p "^\\+(\\+ 1 3)$" seen))
+      (devops-bb-test--execute-at "begin_src")
+      (should (= 3 (length devops-bb-test--prompts)))
+      ;; Claude writes a script beside it, and another in a subdir.
+      (devops-bb-test--claude-writes (expand-file-name "analyze.py" default-directory)
+                                     "print('one')\nprint('two')\n")
+      (devops-bb-test--claude-writes (expand-file-name "lib/util.sh" default-directory)
+                                     "echo hi\n")
+      (setq devops-bb-test--answers '(?d ?y))
+      (cl-letf (((symbol-function 'recursive-edit)
+                 (lambda () (setq seen (buffer-string)))))
+        (devops-bb-test--execute-at "begin_src"))
+      (should (= 5 (length devops-bb-test--prompts)))
+      (should (member (concat "files changed since you last ran a block: "
+                              "analyze.py +2/-0 (new), lib/util.sh +1/-0 (new)")
+                      (devops-bb-test--notices)))
+      (should-not (seq-find (lambda (n) (string-prefix-p "changed since" n))
+                            (devops-bb-test--notices)))
+      (should (string-match-p "^\\+\\+\\+ b/analyze\\.py$" seen))
+      (should (string-match-p "^\\+print('two')$" seen))
+      (should (string-match-p "^\\+\\+\\+ b/lib/util\\.sh$" seen))
+      (devops-bb-test--execute-at "begin_src")
+      (should (= 5 (length devops-bb-test--prompts)))
+      (devops-bb-test--claude-writes (expand-file-name "analyze.py" default-directory)
+                                     "print('one')\nprint('three')\n")
+      (devops-bb-test--execute-at "begin_src")
+      (should (member "files changed since you last ran a block: analyze.py +1/-1"
+                      (devops-bb-test--notices)))
+      ;; A cancelled prompt is not a yes: it asks again.
+      (devops-bb-test--claude-writes (expand-file-name "analyze.py" default-directory) "x\n")
+      (setq devops-bb-test--answers '(?n))
+      (devops-bb-test--execute-at "begin_src")
+      (should (= 7 (length devops-bb-test--prompts)))
+      (devops-bb-test--execute-at "begin_src")
+      (should (= 8 (length devops-bb-test--prompts))))))
+
+(ert-deftest devops-bb-review-failed-run-test ()
+  "A run is recorded once it ran: one that failed after the yes asks again."
+  (devops-bb-test--with-workbook
+      (root buf "* Run\n\n#+name: boom\n#+begin_src emacs-lisp\n(error \"Boom\")\n#+end_src\n")
+    (should-error (devops-bb-test--execute-at "begin_src"))
+    (should-error (devops-bb-test--execute-at "begin_src"))
+    (should (equal (devops-bb-test--prompt-names) '("boom" "boom")))))
+
+(ert-deftest devops-bb-review-unattached-test ()
+  "A buffer that is not attached keeps the user's
+`org-confirm-babel-evaluate'; an attached one never calls it."
+  (devops-bb-test--with-workbook (root buf devops-bb-test--named-block)
+    (let* ((calls nil)
+           (org-confirm-babel-evaluate (lambda (lang _body) (push lang calls) nil)))
+      (devops-bb-test--execute-at "begin_src")
+      (should-not calls)
+      (should (= 1 (length devops-bb-test--prompts)))
+      (devops-bb-test--with-org "#+begin_src emacs-lisp\n(+ 1 2)\n#+end_src\n"
+        (should (equal (devops-bb-test--execute-at "begin_src") 3))
+        (should calls)
+        (should (equal (delete-dups calls) '("emacs-lisp")))
+        (should (= 1 (length devops-bb-test--prompts)))))))
+
+(defconst devops-bb-test--plants
+  '(("own :var" "* Run\n\n#+begin_src emacs-lisp :var x=(setq devops-bb-test--pwned 1)\nx\n#+end_src\n"
+     "begin_src" ":var x")
+    ("#+PROPERTY" "#+PROPERTY: header-args :var x=(setq devops-bb-test--pwned 2)\n\n* Run\n\n#+begin_src emacs-lisp\nx\n#+end_src\n"
+     "begin_src" ":var x")
+    ("property drawer" "* Run\n:PROPERTIES:\n:header-args:emacs-lisp: :dir (setq devops-bb-test--pwned 3)\n:END:\n\n#+begin_src emacs-lisp\n1\n#+end_src\n"
+     "begin_src" ":dir")
+    ("#+HEADER" "* Run\n\n#+HEADER: :results (setq devops-bb-test--pwned 4)\n#+begin_src emacs-lisp\n1\n#+end_src\n"
+     "begin_src" ":results")
+    ("#+call: argument" "* Run\n\n#+name: blk\n#+begin_src emacs-lisp :var n=1\nn\n#+end_src\n\n#+call: blk(n=(setq devops-bb-test--pwned 5))\n"
+     "^#\\+call" ":var n")
+    ("#+call: header" "* Run\n\n#+name: blk\n#+begin_src emacs-lisp\n1\n#+end_src\n\n#+call: blk() :dir (setq devops-bb-test--pwned 6)\n"
+     "^#\\+call" ":dir")
+    ("inline src block" "* Run\n\nsrc_emacs-lisp[:var x=(setq devops-bb-test--pwned 7)]{x}\n"
+     "src_" ":var x")
+    ("inline call" "* Run\n\n#+name: blk\n#+begin_src emacs-lisp :var n=1\nn\n#+end_src\n\ncall_blk(n=(setq devops-bb-test--pwned 8))\n"
+     "call_" ":var n")
+    ("reference argument" "* Run\n\n#+name: blk\n#+begin_src emacs-lisp :var n=1\nn\n#+end_src\n\n#+begin_src emacs-lisp :var y=blk(n=(setq devops-bb-test--pwned 9))\ny\n#+end_src\n"
+     "begin_src emacs-lisp :var y" ":var y")
+    ("reference header" "* Run\n\n#+name: blk\n#+begin_src emacs-lisp\n1\n#+end_src\n\n#+begin_src emacs-lisp :var y=blk[:dir (setq devops-bb-test--pwned 10)]()\ny\n#+end_src\n"
+     "begin_src emacs-lisp :var y" ":var y")
+    ("named call" "* Run\n\n#+name: blk\n#+begin_src emacs-lisp :var n=1\nn\n#+end_src\n\n#+name: c\n#+call: blk(n=(setq devops-bb-test--pwned 11))\n\n#+begin_src emacs-lisp :var y=c\ny\n#+end_src\n"
+     "begin_src emacs-lisp :var y" ":var n")
+    ("noweb call" "* Run\n\n#+name: blk\n#+begin_src emacs-lisp :var n=1\nn\n#+end_src\n\n#+begin_src emacs-lisp :noweb yes\n<<blk(n=(setq devops-bb-test--pwned 12))>>\n#+end_src\n"
+     "begin_src emacs-lisp :noweb" "reference"))
+  "Elisp Claude can plant in a header: (WHAT TEXT AT REFUSAL).
+Running what is at AT in a workbook of TEXT must be refused, naming
+REFUSAL, and must never set `devops-bb-test--pwned'.")
+
+(defun devops-bb-test--refuses-plants (&optional any-refusal)
+  "Run each of `devops-bb-test--plants' attached; check it is refused.
+With ANY-REFUSAL, the refusal need not name the header, and may come
+after the block's own prompt, as for a noweb call, which runs once the
+block is confirmed."
+  (pcase-dolist (`(,what ,text ,at ,refusal) devops-bb-test--plants)
+    (ert-info (what :prefix "plant: ")
+      (devops-bb-test--with-workbook (root buf text)
+        (setq devops-bb-test--pwned nil)
+        (let ((err (should-error (devops-bb-test--execute-at at) :type 'user-error)))
+          (should (string-match-p (concat "\\`elisp in header "
+                                          (if any-refusal "" (regexp-quote refusal)))
+                                  (cadr err)))
+          (should-not devops-bb-test--pwned)
+          (unless any-refusal
+            (should-not devops-bb-test--prompts)))))))
+
+(ert-deftest devops-bb-review-elisp-refused-test ()
+  "Elisp in a header value, own or inherited, refuses the run before org
+evaluates it, and before any prompt: the planted elisp never runs."
+  (devops-bb-test--refuses-plants)
+  ;; Unattached, org runs it: the plants are real.
+  (pcase-dolist (`(,what ,text ,at ,_) devops-bb-test--plants)
+    (ert-info (what :prefix "plant, unattached: ")
+      (setq devops-bb-test--pwned nil)
+      (let ((org-confirm-babel-evaluate nil))
+        (devops-bb-test--with-org text
+          (org-mode)                    ; For #+PROPERTY.
+          (ignore-errors (devops-bb-test--execute-at at))
+          (should devops-bb-test--pwned))))))
+
+(ert-deftest devops-bb-review-read-guard-test ()
+  "With the raw-header checks off, the guard on `org-babel-read' alone
+still refuses every planted elisp."
+  (cl-letf (((symbol-function 'devops-bb-review--check-params) #'ignore)
+            ((symbol-function 'devops-bb-review--check-ref) #'ignore))
+    (devops-bb-test--refuses-plants t)))
+
+(ert-deftest devops-bb-review-post-this-test ()
+  "*this* only names a variable: `:post' passes the result on."
+  (devops-bb-test--with-workbook
+      (root buf (concat "* Run\n\n#+name: twice\n#+begin_src emacs-lisp :var x=0\n(* 2 x)\n#+end_src\n\n"
+                        "#+begin_src emacs-lisp :post twice(x=*this*)\n21\n#+end_src\n"))
+    (should (equal (devops-bb-test--execute-at "begin_src emacs-lisp :post") 42))))
+
+(ert-deftest devops-bb-review-dir-check-test ()
+  "A dotfile, dot-dir or symlink at any depth suspends the buffer: runs
+are refused with the reason, and the mode line says so.  Removing it
+resumes the buffer.  Attach refuses such a dir."
+  (devops-bb-test--with-workbook (root buf devops-bb-test--named-block)
+    (let ((dir default-directory))
+      ;; Edits make no lock file, which would be a dotfile symlink.
+      (goto-char (point-max))
+      (insert "\n")
+      (should-not (directory-files dir nil "\\`\\.#"))
+      (save-buffer)
+      (pcase-dolist (`(,plant ,reason)
+                     `((,(lambda () (make-directory (expand-file-name ".git" dir)))
+                        "sandbox dir has .git/: remove it to continue")
+                       (,(lambda () (devops-bb-test--claude-writes
+                                     (expand-file-name "sub/deep/.envrc" dir) "x"))
+                        "sandbox dir has sub/deep/.envrc: remove it to continue")
+                       (,(lambda ()
+                           (make-directory (expand-file-name "sub" dir) t)
+                           (make-symbolic-link "/etc" (expand-file-name "sub/etc" dir)))
+                        "sandbox dir has symlink sub/etc: remove it to continue")
+                       (,(lambda () (make-symbolic-link "nowhere" (expand-file-name "dangling" dir)))
+                        "sandbox dir has symlink dangling: remove it to continue")))
+        (funcall plant)
+        (revert-buffer t t)
+        (should (equal (devops-bb-review-suspended) reason))
+        (should (string-match-p "sandbox: SUSPENDED" (devops-bb-sandbox--mode-line)))
+        (let ((err (should-error (devops-bb-test--execute-at "begin_src") :type 'user-error)))
+          (should (equal (cadr err) reason)))
+        (dolist (f (list ".git" "sub/deep/.envrc" "sub/etc" "dangling"))
+          (let ((f (expand-file-name f dir)))
+            (cond ((file-symlink-p f) (delete-file f))
+                  ((file-directory-p f) (delete-directory f t))
+                  ((file-exists-p f) (delete-file f)))))
+        (should (equal (devops-bb-test--execute-at "begin_src") 3))
+        (should-not (devops-bb-review-suspended))
+        (should (string-match-p "sandbox: wb" (devops-bb-sandbox--mode-line))))
+      (devops-bb-test--detach buf)
+      (devops-bb-test--claude-writes (expand-file-name ".dir-locals.el" dir) "()")
+      (let ((err (should-error (devops-bb-sandbox-attach "a" "wb") :type 'user-error)))
+        (should (equal (cadr err) "sandbox dir has .dir-locals.el: remove it to continue"))))))
+
+(ert-deftest devops-bb-review-file-test ()
+  "`:file' and `:output-dir' must stay inside the workbook's dir."
+  (let ((outside (make-temp-file "devops-outside-" t)))
+    (unwind-protect
+        (devops-bb-test--with-workbook
+            (root buf (format (concat "* Run\n\n"
+                                      "#+begin_src emacs-lisp :results file :file ../x.txt\n1\n#+end_src\n\n"
+                                      "#+begin_src emacs-lisp :results file :file %s/x.txt\n2\n#+end_src\n\n"
+                                      "#+begin_src emacs-lisp :results file :output-dir %s/made :file x.txt\n3\n#+end_src\n\n"
+                                      "#+begin_src emacs-lisp :results file :output-dir out :file x.txt\n4\n#+end_src\n")
+                              outside outside))
+          (let ((err (should-error (devops-bb-test--execute-at "begin_src.*:file \\.\\./x")
+                                   :type 'user-error)))
+            (should (string-match-p "\\`:file \\.\\./x\\.txt is outside the sandbox dir" (cadr err))))
+          (should-error (devops-bb-test--execute-at "begin_src.*:file /") :type 'user-error)
+          (should-error (devops-bb-test--execute-at "begin_src.*:output-dir /") :type 'user-error)
+          (should-not (file-exists-p (expand-file-name "made" outside)))
+          (should-not (file-exists-p (expand-file-name "x.txt" outside)))
+          (should-not (file-exists-p (expand-file-name "../x.txt" default-directory)))
+          (should-not devops-bb-test--prompts)
+          (devops-bb-test--execute-at "begin_src.*:output-dir out")
+          (should (file-exists-p (expand-file-name "out/x.txt" default-directory))))
+      (delete-directory outside t))))
+
+(defconst devops-bb-test--local-variables
+  (concat devops-bb-test--named-block
+          "\n# Local Variables:\n# devops-bb-test-local: 1\n"
+          "# eval: (setq devops-bb-test--pwned t)\n# End:\n")
+  "A workbook Claude planted local variables in.")
+
+(ert-deftest devops-bb-review-local-variables-test ()
+  "Planted local variables, eval: among them, do nothing on M-x
+revert-buffer or on auto-revert; a .dir-locals.el above is ignored."
+  (let ((enable-local-variables :all)
+        (enable-local-eval t))
+    (setq devops-bb-test--pwned nil)
+    (devops-bb-test--with-workbook (root buf devops-bb-test--named-block)
+      (devops-bb-test--claude-writes (expand-file-name ".dir-locals.el" root)
+                                     "((nil . ((devops-bb-test-local . 2))))")
+      (devops-bb-test--claude-writes (buffer-file-name) devops-bb-test--local-variables)
+      (revert-buffer t t)
+      (should (string-match-p "eval: " (buffer-string)))
+      (should-not devops-bb-test--pwned)
+      (should-not (local-variable-p 'devops-bb-test-local))
+      (devops-bb-test--claude-writes (buffer-file-name)
+                                     (concat "#+TITLE: x\n" devops-bb-test--local-variables))
+      (auto-revert-mode 1)
+      (auto-revert-handler)
+      (should (string-prefix-p "#+TITLE: x" (buffer-string)))
+      (should-not devops-bb-test--pwned)
+      (should-not (local-variable-p 'devops-bb-test-local))
+      ;; Unattached, the same revert runs them: the plants are real.
+      (devops-bb-test--detach buf)
+      (revert-buffer t t)
+      (should devops-bb-test--pwned)
+      (should (equal devops-bb-test-local 1)))))
+
+(ert-deftest devops-bb-review-attach-drops-local-variables-test ()
+  "Local variables a buffer read before it was attached are dropped."
+  (let ((enable-local-variables :all))
+    (devops-bb-test--with-workbook (root buf devops-bb-test--local-variables)
+      (should-not (local-variable-p 'devops-bb-test-local))
+      (should backup-by-copying)
+      (should (devops-bb-sandbox-attachment)))))
+
+(ert-deftest devops-bb-review-vc-test ()
+  "vc never runs git in an attached buffer's dir."
+  (let* ((calls 0)
+         (count (lambda (&rest _) (cl-incf calls))))
+    (advice-add 'vc-git-registered :before count)
+    (unwind-protect
+        (devops-bb-test--with-sandbox root
+          (devops-bb-test--sink root "a")
+          (should (zerop (call-process "git" nil nil nil "init" "-q" root)))
+          (let ((buf (devops-bb-test--visit root "wb" devops-bb-test--named-block)))
+            (should (> calls 0))
+            (with-current-buffer buf
+              (devops-bb-sandbox-attach "a" "wb")
+              (setq calls 0)
+              (revert-buffer t t)
+              (goto-char (point-max))
+              (insert "\n")
+              (save-buffer)
+              (vc-refresh-state)
+              (should (zerop calls))
+              (should-not vc-mode))))
+      (advice-remove 'vc-git-registered count))))
+
+(ert-deftest devops-bb-review-keywords-revert-test ()
+  "A revert that changes keyword lines restarts org, so #+PROPERTY holds;
+one that does not, does not."
+  (devops-bb-test--with-workbook
+      (root buf (concat "#+PROPERTY: header-args :results value\n\n" devops-bb-test--named-block))
+    (let ((restarts 0))
+      (cl-letf* ((orig (symbol-function 'org-mode-restart))
+                 ((symbol-function 'org-mode-restart)
+                  (lambda () (cl-incf restarts) (funcall orig))))
+        (devops-bb-test--claude-writes
+         (buffer-file-name)
+         (concat "#+PROPERTY: header-args :results value\n\n" devops-bb-test--named-block "\ntext\n"))
+        (revert-buffer t t t)
+        (should (= restarts 0))
+        (devops-bb-test--claude-writes
+         (buffer-file-name)
+         (concat "#+PROPERTY: header-args :results output\n\n" devops-bb-test--named-block))
+        (revert-buffer t t t)
+        (should (= restarts 1))
+        (should (equal (org-entry-get (point-max) "header-args" t) ":results output"))
+        (should (devops-bb-sandbox-attachment))))))
+
+(ert-deftest devops-bb-review-posframe-off-test ()
+  "With ob-confirm-posframe-mode off after attach, runs are refused."
+  (devops-bb-test--with-workbook (root buf devops-bb-test--named-block)
+    (ob-confirm-posframe-mode -1)
+    (unwind-protect
+        (should-error (devops-bb-test--execute-at "begin_src") :type 'user-error)
+      (ob-confirm-posframe-mode 1))))
+
+(ert-deftest devops-bb-review-scheme-test ()
+  "Attach refuses a scheme without :allow; a run on a scheme whose :allow
+went after attach is refused; the prompt shows the scheme's environment."
+  (let ((devops-target-schemes '(("aws" :env (("AWS_PROFILE" . "%s"))))))
+    (devops-bb-test--with-sandbox root
+      (devops-bb-test--sink root "a")
+      (let ((buf (devops-bb-test--visit
+                  root "wb"
+                  (concat "#+TARGET: cloud /aws:dev:\n#+TARGET: other /aws:prod:\n\n"
+                          "* Run\t\t:cloud:\n\n#+name: profile\n#+begin_src emacs-lisp\n(getenv \"AWS_PROFILE\")\n#+end_src\n\n"
+                          "* Other\t\t:other:\n\n#+name: other\n#+begin_src emacs-lisp\n1\n#+end_src\n"))))
+        (with-current-buffer buf
+          (let ((err (should-error (devops-bb-sandbox-attach "a" "wb") :type 'user-error)))
+            (should (equal (cadr err) "scheme aws has no :allow; a sandboxed workbook may only name allowed credentials")))
+          (setq devops-target-schemes '(("aws" :env (("AWS_PROFILE" . "%s")) :allow ("dev"))))
+          (devops-bb-sandbox-attach "a" "wb")
+          (should (equal (devops-bb-test--execute-at "#\\+name: profile") "dev"))
+          (should (member "credential: target /aws:dev: · AWS_PROFILE=dev" (devops-bb-test--notices)))
+          (should (string-match-p "  target cloud /aws:dev: · AWS_PROFILE=dev\\'"
+                                  (nth 3 (car devops-bb-test--prompts))))
+          (let ((err (should-error (devops-bb-test--execute-at "#\\+name: other") :type 'user-error)))
+            (should (string-match-p "aws:prod is not in :allow" (cadr err))))
+          (setq devops-target-schemes '(("aws" :env (("AWS_PROFILE" . "%s")))))
+          (let ((err (should-error (devops-bb-test--execute-at "#\\+name: profile") :type 'user-error)))
+            (should (equal (cadr err) "scheme aws has no :allow; a sandboxed workbook may only name allowed credentials"))))))))
+
+(defvar devops-bb-test--instance nil
+  "Where a test's dynamic target says its instance is.")
+
+(ert-deftest devops-bb-review-dynamic-target-test ()
+  "A dynamic target's block prompts as block › target-block, telling
+what it resolves.  A new instance makes the block under it prompt once,
+with the target's change."
+  (let ((a (file-name-as-directory (make-temp-file "devops-instance-" t)))
+        (b (file-name-as-directory (make-temp-file "devops-instance-" t)))
+        (devops-enable-session-async nil))
+    (unwind-protect
+        (devops-bb-test--with-workbook
+            (root buf (concat "#+TARGET: local <<where()>>\n\n"
+                              "* Locate\n\n#+name: where\n#+begin_src emacs-lisp\ndevops-bb-test--instance\n#+end_src\n\n"
+                              "* Check\t\t:local:\n\n#+name: check-disk\n#+begin_src emacs-lisp\n(+ 1 1)\n#+end_src\n"))
+          (setq devops-bb-test--instance a)
+          (devops-bb-test--execute-at "#\\+name: check-disk")
+          (should (equal (devops-bb-test--prompt-names) '("where" "check-disk")))
+          (let ((where (car (last devops-bb-test--prompts))))
+            (should (string-match-p "check-disk › where" (nth 1 where)))
+            (should (member "resolves target local for check-disk" (nth 2 where))))
+          (devops-bb-test--execute-at "#\\+name: check-disk")
+          (should (= 2 (length devops-bb-test--prompts)))
+          (setq devops-bb-test--instance b)
+          (devops-bb-test--execute-at "#\\+name: check-disk")
+          (should (equal (devops-bb-test--prompt-names) '("where" "check-disk" "check-disk")))
+          (should (member (format "target changed: local %s → local %s" a b)
+                          (devops-bb-test--notices)))
+          (devops-bb-test--execute-at "#\\+name: check-disk")
+          (should (= 3 (length devops-bb-test--prompts))))
+      (delete-directory a t)
+      (delete-directory b t))))
 
 (provide 'devops-bb-test)
 

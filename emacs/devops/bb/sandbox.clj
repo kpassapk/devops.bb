@@ -37,8 +37,14 @@
   A publisher that dies while attached shows `sandbox: DEAD' in the
   mode line; attaching again offers to restart it, as a new feed.
 
-  No review yet: an attached buffer runs blocks as any other does."
+  Each run in an attached buffer is reviewed, by devops-bb-review.el:
+  confirmed unless unchanged, elisp in its headers refused, its
+  directory checked.  A directory that fails the check suspends the
+  buffer, `sandbox: SUSPENDED' in the mode line, until it passes again.
+  Attach refuses one, and a scheme target without :allow.  The review's
+  state is the attachment's :review."
   (:require [devops-bb-scripting :as s]
+            [devops-bb-review :as review]
             [devops.bb.log :as log]))
 
 (el! (require 'org-id)
@@ -69,7 +75,8 @@ The sink's flags follow them."
      (defvar devops-bb-sandbox--registry (make-hash-table :test 'eq)
        "Base buffer to its attachment, a map: :sink, the sink's name;
 :feed; :process, the publisher; :subscriber; :file, the file the
-publisher was last told of; :dead, once the publisher died attached.
+publisher was last told of; :dead, once the publisher died attached;
+:review, devops-bb-review.el's state, kept here so a revert keeps it.
 Global, not buffer-local: `revert-buffer' kills buffer-locals.")
 
      (defvar devops-bb-sandbox-quit-timeout 2
@@ -263,7 +270,9 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
 (defn- mode-line []
   (when-let [att (attachment)]
     (str " sandbox: "
-         (if (:dead att) (el/propertize "DEAD" 'face 'error) (:feed att))
+         (cond (:dead att) (el/propertize "DEAD" 'face 'error)
+               (el/devops-bb-review-suspended) (el/propertize "SUSPENDED" 'face 'error)
+               :else (:feed att))
          " ")))
 
 (defn- hooks!
@@ -274,13 +283,15 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
         (el/add-hook 'kill-emacs-hook 'devops-bb-sandbox--on-kill-emacs)
         (el/add-hook 'after-set-visited-file-name-hook 'devops-bb-sandbox--on-rename)
         (el/add-hook 'after-change-major-mode-hook 'devops-bb-sandbox--on-major-mode)
-        (el/add-to-list 'mode-line-misc-info el/devops-bb-sandbox--mode-line-entry))
+        (el/add-to-list 'mode-line-misc-info el/devops-bb-sandbox--mode-line-entry)
+        (el/devops-bb-review-enable true))
     (do (el/remove-hook 'kill-buffer-hook 'devops-bb-sandbox--on-kill-buffer)
         (el/remove-hook 'kill-emacs-hook 'devops-bb-sandbox--on-kill-emacs)
         (el/remove-hook 'after-set-visited-file-name-hook 'devops-bb-sandbox--on-rename)
         (el/remove-hook 'after-change-major-mode-hook 'devops-bb-sandbox--on-major-mode)
         (el/set 'mode-line-misc-info (el/delete el/devops-bb-sandbox--mode-line-entry
-                                                el/mode-line-misc-info)))))
+                                                el/mode-line-misc-info))
+        (el/devops-bb-review-enable false))))
 
 (defn- close!
   "Detach BUFFER: stop sending its entries and close its publisher's
@@ -292,7 +303,8 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
     (el/remhash buffer el/devops-bb-sandbox--registry)
     (when (el/buffer-live-p buffer)
       (el! (with-current-buffer (clj! buffer)
-             (kill-local-variable 'backup-by-copying))))
+             (kill-local-variable 'backup-by-copying)))
+      (el/devops-bb-review-detached buffer))
     (when (el/process-live-p (:process att))
       (el/process-send-eof (:process att)))
     (when (zero? (el/hash-table-count el/devops-bb-sandbox--registry))
@@ -327,10 +339,12 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
 
 (defn- on-major-mode
   "Copy, not rename, on backup: the sandbox's mount and pull follow the
-  file.  Again after a revert, which kills buffer-locals."
+  file.  Keep Emacs's lock, backup and auto-save files out of the
+  workbook's directory.  Again after a revert, which kills buffer-locals."
   []
   (when (el/gethash (el/current-buffer) el/devops-bb-sandbox--registry)
-    (el! (setq-local backup-by-copying t))))
+    (el! (setq-local backup-by-copying t))
+    (el/devops-bb-review-setup-buffer)))
 
 ;;; Commands
 
@@ -344,7 +358,8 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
     (when (el/file-remote-p file)
       (el/user-error "A remote workbook cannot be attached: %s" file))
     (when-not (el! (bound-and-true-p ob-confirm-posframe-mode))
-      (el/user-error "Turn on ob-confirm-posframe-mode first: an attached buffer's runs need its review"))))
+      (el/user-error "Turn on ob-confirm-posframe-mode first: an attached buffer's runs need its review"))
+    (el/devops-bb-review-check-attach buffer)))
 
 (defn- warn-siblings
   "Warn when FILE's directory holds other .org files: the sandbox gets
@@ -411,13 +426,15 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
                           :feed feed
                           :process (start! buffer flags feed)
                           :subscriber f
-                          :file nil}
+                          :file nil
+                          :review (el/devops-bb-review-create buffer)}
                   el/devops-bb-sandbox--registry)
       (hooks! true)
       (follow-file! buffer (attachment buffer))
       (log/subscribe f buffer)
       (el! (with-current-buffer (clj! buffer)
              (devops-bb-sandbox--on-major-mode)))
+      (el/devops-bb-review-attached buffer)
       (el/force-mode-line-update true)
       (el/message "Attached %s to sink %s as feed %s" (el/buffer-name buffer) sink feed)
       (attachment buffer))))
