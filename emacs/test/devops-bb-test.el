@@ -1647,6 +1647,7 @@ one that does not, does not."
 (ert-deftest devops-bb-review-scheme-test ()
   "Attach refuses a scheme without :allow; a run on a scheme whose :allow
 went after attach is refused; the prompt shows the scheme's environment."
+  (skip-unless (fboundp 'devops-target-env))
   (let ((devops-target-schemes '(("aws" :env (("AWS_PROFILE" . "%s"))))))
     (devops-bb-test--with-sandbox root
       (devops-bb-test--sink root "a")
