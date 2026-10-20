@@ -24,7 +24,15 @@
 
   Runs a script asks for are not the user's, and are not logged: blocks
   run under `devops-with-sync', for a reference, a dynamic target or a
-  tangle, and tangles and drift checks called as functions."
+  tangle, and tangles and drift checks called as functions.
+
+  Each of these is an entry, a map, built once and handed to each
+  subscriber: the log file, while `devops-bb-execution-log' is set; the
+  functions `devops-bb-log-subscribe' added for every buffer; and those
+  it added for the base buffer of the one the entry comes from, so a run
+  from an indirect buffer reaches its base buffer's.  A subscriber that
+  signals is reported in *Messages*, and the others, and what the user
+  did, go on."
   (:require [devops-bb-scripting :as s]))
 
 (el! (defcustom devops-bb-execution-log nil
@@ -43,6 +51,14 @@ Bound by `devops-bb-log--during-async-filter', so that
 result a block inserts, and names the session without resolving the
 target.")
 
+     (defvar devops-bb-log--subscribers nil
+       "Functions `devops-bb-log-subscribe' added for every buffer, in order.")
+
+     (defvar devops-bb-log--buffer-subscribers
+       (make-hash-table :test 'eq :weakness 'key)
+       "Base buffer to the functions `devops-bb-log-subscribe' added for it.
+Global, not buffer-local: `revert-buffer' kills buffer-locals.")
+
      (defvar devops-bb-log-mode))
 
 (defn append-entry
@@ -53,14 +69,72 @@ target.")
     (el/make-directory (el/file-name-directory file) true)
     (el/write-region (str (el/json-encode entry) "\n") nil file true 'silent)))
 
-(defn- on? []
-  (and (el! (bound-and-true-p devops-mode)) el/devops-bb-execution-log))
-
 (defn- header [event]
   {:time (el/format-time-string "%FT%T.%3N%z")
    :event event
    :file (el/buffer-file-name (el/buffer-base-buffer))
    :buffer (el/buffer-name)})
+
+;;; Subscribers
+
+(defn- base
+  "BUFFER's base buffer, or BUFFER if it is not indirect."
+  [buffer]
+  (or (el/buffer-base-buffer buffer) buffer))
+
+(defn- adjoin [f fs]
+  (if (el/memq f fs) fs (el/append fs (list f))))
+
+(defn subscribe
+  "Call F with each entry emitted, a map, from then on.
+  With BUFFER, only the entries from it and from the other buffers that
+  share its base buffer; without, the entries from every buffer.  F is
+  added once however often it is subscribed, and called in the order
+  added, after the log file."
+  [f & [buffer]]
+  (if buffer
+    (let [b (base buffer)
+          table el/devops-bb-log--buffer-subscribers]
+      (el/puthash b (adjoin f (el/gethash b table)) table))
+    (el/set 'devops-bb-log--subscribers
+            (adjoin f el/devops-bb-log--subscribers)))
+  f)
+
+(defn unsubscribe
+  "Stop calling F, as `devops-bb-log-subscribe' added it with BUFFER."
+  [f & [buffer]]
+  (if buffer
+    (let [b (base buffer)
+          table el/devops-bb-log--buffer-subscribers
+          fs (el/remq f (el/gethash b table))]
+      (if fs (el/puthash b fs table) (el/remhash b table)))
+    (el/set 'devops-bb-log--subscribers
+            (el/remq f el/devops-bb-log--subscribers)))
+  nil)
+
+(defn- subscribers
+  "The functions an entry from the current buffer goes to, in order."
+  []
+  (concat (when el/devops-bb-execution-log ['devops-bb-log-append-entry])
+          el/devops-bb-log--subscribers
+          (el/gethash (base (el/current-buffer))
+                      el/devops-bb-log--buffer-subscribers)))
+
+(defn- listening? []
+  (and (el! (bound-and-true-p devops-mode)) (seq (subscribers))))
+
+(defn- emit
+  "Call each subscriber with the entry for EVENT from the current buffer.
+  The entry is its header merged with the map FIELDS returns, and is
+  built once, only when some subscriber listens."
+  [event & [fields]]
+  (when-let [fs (listening?)]
+    (let [entry (merge (header event) (when fields (fields)))]
+      (doseq [f fs]
+        (try (el/funcall f entry)
+             (catch :default e
+               (el/message "devops-bb-log: %S failed on %s: %s"
+                           f event (el/error-message-string e))))))))
 
 ;;; Block runs
 
@@ -70,18 +144,17 @@ target.")
          (devops-bb-scripting--src-block-at (clj! line))
          (or (clj! session) (user-error "Not run on a #+TARGET"))))))
 
-(defn- block-entry
-  "The entry for EVENT on the src block at POS, run in SESSION.
+(defn- block-fields
+  "The fields of an entry on the src block at POS, run in SESSION.
   Its line, and its session, status and id as
   `devops-bb-scripting-block-output' answers them for SESSION; ID, when
   given, is the run's, and replaces the one the block would be asked
   for.  The target is not resolved again: for a dynamic target that
   would run its block.  A block that ran on no target, SESSION nil, is
   logged with an error."
-  [event pos session id]
+  [pos session id]
   (let [line (el/line-number-at-pos pos)]
-    (merge (header event)
-           {:line line}
+    (merge {:line line}
            (try
              (let [answer (block-output line session)]
                {:session (get answer :session)
@@ -90,8 +163,8 @@ target.")
              (catch :default e {:error (el/error-message-string e)})))))
 
 (defn- block! [event pos session id]
-  (when (and (on?) (el/devops-user-run-p))
-    (append-entry (block-entry event pos session id))))
+  (when (el/devops-user-run-p)
+    (emit event (fn [] (block-fields pos session id)))))
 
 (defn- on-execute
   "Log the src block just executed, for `org-babel-after-execute-hook'.
@@ -126,7 +199,7 @@ target.")
   [f & args]
   (let [pos (el/point)
         session el/devops-bb-log--async-result
-        id (when (and session (on?)) (placeholder-id-at pos))
+        id (when (and session (listening?)) (placeholder-id-at pos))
         value (apply f args)]
     (when session
       (el! (let ((devops-bb-log--async-result nil))
@@ -165,22 +238,20 @@ target.")
   `devops-command-functions'.  ALL non-nil means it ran on every
   target-tagged heading, and no heading is logged."
   [event all value err]
-  (when (on?)
-    (append-entry
-     (merge (header event)
-            {:all (if all true :json-false)}
-            (when-not all (heading))
-            (cond err {:error (el/error-message-string err)}
-                  (= event "tangle") (tangle-fields value)
-                  :else (drift-fields value))))))
+  (emit event
+        (fn []
+          (merge {:all (if all true :json-false)}
+                 (when-not all (heading))
+                 (cond err {:error (el/error-message-string err)}
+                       (= event "tangle") (tangle-fields value)
+                       :else (drift-fields value))))))
 
 ;;; Unsaved edits
 
 (defn- edit! [event]
-  (when (and (on?)
-             (el/derived-mode-p 'org-mode)
+  (when (and (el/derived-mode-p 'org-mode)
              (el/buffer-file-name (el/buffer-base-buffer)))
-    (append-entry (header event))))
+    (emit event)))
 
 (defn- on-change [] (edit! "modify"))
 (defn- on-save [] (edit! "save"))
@@ -213,7 +284,8 @@ An `execute' line when a block runs, `result' when an async block's
 result arrives, `tangle' and `drift' for `devops-tangle' and
 `devops-drift', and `modify', `save', `revert' and `kill' for an org
 buffer's unsaved edits.  Logs only while `devops-mode' is on and
-`devops-bb-execution-log' is set."
+`devops-bb-execution-log' is set; while `devops-mode' is on, the same
+entries go to the functions `devops-bb-log-subscribe' added."
        :global t
        :group 'devops
        (devops-bb-log--hooks! devops-bb-log-mode)))
