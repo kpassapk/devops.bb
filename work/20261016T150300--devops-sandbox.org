@@ -158,7 +158,8 @@ Ways in, and what closes each:
 | Claude writes                                         | Closed by                                  |
 |-------------------------------------------------------+--------------------------------------------|
 | a block, or a changed block                           | confirm every run (Review)                 |
-| =:var x=(elisp)=, =#+PROPERTY header-args=, noweb      | prompt shows processed params, expanded body |
+| =:var x=(elisp)=, =#+PROPERTY header-args=            | elisp in a header value is refused before org evaluates it (Review) |
+| a noweb reference or call                             | prompt shows references expanded, calls as written, with a notice |
 | =#+TARGET=, static or dynamic                         | prompt shows resolved target; change re-prompts |
 | =analyze.py=, =bb.edn= run by an approved block        | the workbook dir is in the fingerprint     |
 | commits, pushed by an approved block                  | bundle SHAs in the fingerprint; prompt shows the log (Code) |
@@ -235,9 +236,20 @@ advice, before org's confirm, so by then =params= holds the injected
 - =ob-confirm-posframe-notice-functions= (new): highlighted lines above
   the body. devops.bb adds "changed since you ran it" with the block's
   diff, "files changed since you last ran a block" with =+n/-m= per
-  file, "elisp in header: =:dir (…)=", "resolves target =prod= for
+  file, "noweb call: =name()=", "resolves target =prod= for
   =check-disk=", and "target changed: =A= → =B=".
-- the body with noweb expanded (new, an option): the text that runs.
+- the body with noweb references expanded (new, an option): the text
+  that runs. A call =<<name()>>= is shown as written, never expanded:
+  =org-babel-expand-noweb-references= runs it (PR 6's spike).
+
+*Elisp in a header is refused, not shown.* Org evaluates elisp header
+values (=:var x=(…)=, =:dir (…)=, inherited ones from =#+PROPERTY= or a
+property drawer) when it processes params, which is before the confirm
+(PR 6's spike), so no prompt can guard it. In an attached buffer, an
+advice outside org's processing reads the block's raw, unevaluated
+params, inherited ones included, and refuses the run when a value is
+elisp: "elisp in header =:var x=: a sandboxed workbook may not
+evaluate header values".
 - =d= (new): the full notice, a multi-file =diff-mode= buffer, in a
   window, then back to the prompt.
 - the advice goes on at depth -90 (new), outside devops.el's, so a
@@ -701,6 +713,16 @@ bb test 2>&1 | tail -n 5
 bb test-emacs 2>&1 | tail -n 5
 #+end_src
 
+#+RESULTS:
+: Testing devops.bb.view-test
+: 
+: Ran 11 tests containing 29 assertions.
+: 0 failures, 0 errors.
+: 1 unexpected results:
+:    FAILED  devops-bb-log-drift-test
+: 
+: Error while executing task: test-emacs
+
 *** Spike: is the output in the session when =result= is emitted?   :local:
 
 The sandbox subscriber reads a run's output by ID at its =result= emit,
@@ -721,6 +743,8 @@ then the cleanup.
 (advice-add 'org-babel-insert-result :before #'spike/result)
 #+end_src
 
+#+RESULTS:
+
 #+name: spike-messages
 #+begin_src emacs-lisp :var n=5 :results output
 (with-current-buffer "*Messages*"
@@ -729,9 +753,18 @@ then the cleanup.
   (princ (buffer-substring-no-properties (point) (point-max))))
 #+end_src
 
+#+RESULTS: spike-messages
+: Wrote /Users/kyle/src/github.com/kpassapk/devops.bb/work/20261016T150300--devops-sandbox.org
+: spike result devops:/Users/kyle/src/github.com/kpassapk/devops.bb/ 227d1052-058a-4dbf-ab1c-066c4e073c2b: ((:session . "devops:/Users/kyle/src/github.com/kpassapk/devops.bb/") (:status . :done) (:id . "227d1052-058a-4dbf-ab1c-066c4e073c2b") (:input . "echo spike-tem
+: Code block evaluation complete.
+: Wrote /Users/kyle/src/github.com/kpassapk/devops.bb/work/20261016T150300--devops-sandbox.org
+: Executing Emacs-Lisp code block (spike-messages)...
+
 #+begin_src emacs-lisp
 (advice-remove 'org-babel-insert-result #'spike/result)
 #+end_src
+
+#+RESULTS:
 
 *** Done when
 
@@ -760,12 +793,20 @@ session and one of its run IDs (=bb sessions=, =bb follow=). The answer
 gives the PR's before-and-after numbers.
 
 #+begin_src emacs-lisp
-(let ((s "devops:web-1 /ssh:web-1:") (id "RUN-ID"))
+(let ((s "devops:/Users/kyle/src/github.com/kpassapk/devops.bb/") (id "b81a4c26-3fa7-4fe9-8c4d-3a1fb4ba0bdf"))
   (list :chars (buffer-size (get-buffer s))
         :runs (length (devops-bb-scripting--runs s))
         :ms-per-call (* 100 (car (benchmark-run 10
                                    (devops-bb-scripting-run-output s id))))))
 #+end_src
+
+#+RESULTS:
+| :chars | 2671 | :runs | 5 | :ms-per-call | 0.2245 |
+
+Few runs in the only long-lived session (5 runs, 2.7 KB), so also
+measured on a synthetic session buffer: 200 runs of 50 output lines
+(386 KB): =run-output= took ~415 ms per call, for the first ID and
+the last alike (the scan is the whole session either way).
 
 *** Done when
 
@@ -807,6 +848,9 @@ stdin. *Emacs may freeze for up to 10 s.* That freeze is the answer.
   (format "sent %d KB in %.1fs" (/ sent 1024) (- (float-time) t0)))
 #+end_src
 
+#+RESULTS:
+: sent 64 KB in 10.0s
+
 Expected: roughly 64 KB took about 10 s, so a publisher that stops
 reading freezes the operator. If it returns at once, rule 8 is still
 kept, but the PR says why.
@@ -822,6 +866,13 @@ time (yes '{"event":"x"}' | head -n 100000 | bb -e '
                 (.put q ::eof))]
   (loop [n 0] (let [x (.take q)] (if (= x ::eof) (println n) (recur (inc n))))))')
 #+end_src
+
+#+RESULTS:
+: 100000
+: 
+: real	0m0.056s
+: user	0m0.062s
+: sys	0m0.022s
 
 Expected: =100000=, in well under a second.
 
@@ -862,6 +913,9 @@ printf '#!/bin/sh\ntouch %s/called\nexit 1\n' "$d" > "$d/emacsclient"
 chmod +x "$d/emacsclient"
 PATH="$d:$PATH" bb status >/dev/null 2>&1; ls "$d"
 #+end_src
+
+#+RESULTS:
+: called		emacsclient
 
 Expected: =called emacsclient=. If =called= is missing, =emacs.clj=
 finds =emacsclient= without =PATH=, and the test needs another hook.
@@ -911,15 +965,29 @@ it prompts), then =spike-messages=, then the cleanup.
 (advice-add 'org-babel-confirm-evaluate :before #'spike/confirm)
 #+end_src
 
+#+RESULTS:
+
 #+begin_src sh
 hostname
 #+end_src
 
-#+call: spike-messages(n=3)
+#+call: spike-messages(n=8)
+
+#+RESULTS:
+: spike confirm: sh dir=".." session="devops:/Users/kyle/src/github.com/kpassapk/devops.bb/"
+: Setting up indent for shell type zsh
+: Indentation variables are now local.
+: Indentation setup for shell type zsh
+: spike: prompt for unnamed [hostname] 20:50:21.972
+: Evaluation of chain cancelled at unnamed block
+: spike confirm: emacs-lisp dir=".." session="none"
+: Executing Emacs-Lisp call at position 46424...
 
 #+begin_src emacs-lisp
 (advice-remove 'org-babel-confirm-evaluate #'spike/confirm)
 #+end_src
+
+#+RESULTS:
 
 Expected: =dir= and =session= are the ones from =#+TARGET=. If they are
 nil, the target is resolved after the confirm. Then the spec's review
@@ -955,6 +1023,9 @@ to every prompt, and note the order of the prompts. Then read
 (setq-local org-confirm-babel-evaluate t)
 #+end_src
 
+#+RESULTS:
+: t
+
 #+begin_src emacs-lisp :var x=(progn (message "spike: header elisp ran %s" (format-time-string "%T")) 1)
 x
 #+end_src
@@ -968,11 +1039,36 @@ x
 echo <<spike-side()>>
 #+end_src
 
-#+call: spike-messages(n=6)
+#+call: spike-messages(n=10)
+
+#+RESULTS:
+#+begin_example
+Wrote /Users/kyle/src/github.com/kpassapk/devops.el/README.md
+spike: header elisp ran 20:50:40
+spike: prompt for unnamed [x] 20:50:40.099
+Evaluation of chain cancelled at unnamed block
+Setting up indent for shell type zsh
+Indentation variables are now local.
+Indentation setup for shell type zsh
+spike: prompt for unnamed [echo <<spike-side()>>] 20:50:40.106
+Evaluation of chain cancelled at unnamed block
+Executing Emacs-Lisp call at position 48585...
+#+end_example
+
+Answered =n= to each prompt (advice on =ob-confirm-posframe--read-answer=).
+The header elisp ran before the prompt; the noweb call did not run
+before the outer prompt. But =org-babel-expand-noweb-references= on the
+noweb block does execute =spike-side()=: with the buffer confirming it
+prompts for =spike-side= (and a =n= signals out of the expansion); with
+=org-confirm-babel-evaluate= nil it returns "echo spike: noweb call ran
+…". So a preview built with it would run the call.
 
 #+begin_src emacs-lisp
 (kill-local-variable 'org-confirm-babel-evaluate)
 #+end_src
+
+#+RESULTS:
+: org-confirm-babel-evaluate
 
 The answers decide this PR and PR 8:
 
@@ -992,6 +1088,13 @@ The answers decide this PR and PR 8:
   l)
 #+end_src
 
+#+RESULTS:
+| devops--execute-on-target           | nil |
+| ob-confirm-posframe--execute-advice | nil |
+
+Both at depth nil (0). =advice-mapc= walks outermost first:
+ob-confirm-posframe's is outermost today, by load order only.
+
 Expected: devops.el's advice and ob-confirm-posframe's. The -90 change
 puts ob-confirm-posframe's outside devops.el's.
 
@@ -1001,8 +1104,9 @@ puts ob-confirm-posframe's outside devops.el's.
   highlighted lines, which appear above the body.
 - [ ] =d= opens the full notice in a =diff-mode= window, for multi-file
   diffs, then returns to the prompt.
-- [ ] An option shows the body with noweb expanded, as the spike
-  allows: references are expanded and calls are never run.
+- [ ] An option shows the body with noweb references expanded; a call
+  =<<name()>>= is shown as written, with a notice, and never run
+  (tested: the called block's side effect does not happen).
 - [ ] The advice is at depth -90. A block whose dynamic target runs
   another block prompts as =outer › inner=, tested with a stand-in for
   devops.el.
@@ -1027,6 +1131,13 @@ emacs --batch --eval "(progn (make-process :name \"p\" :connection-type 'pipe :n
 sleep 2; ls "$d"
 #+end_src
 
+
+Empty: batch Emacs takes the child down on exit (SIGHUP). The same
+child with =trap '' HUP= in front of =cat= left =flushed=, so a publisher
+that ignores SIGHUP outlives Emacs and flushes. The interactive-Emacs
+quit was not checked (the agent cannot quit the operator's Emacs).
+#+RESULTS:
+
 Expected =flushed=: the child outlives Emacs. If the dir is empty, attach
 needs a =kill-emacs-hook= that sends EOF and waits for the publisher
 (bounded), or must start the publisher in its own process group. Batch
@@ -1046,9 +1157,31 @@ Then =spike-messages= and the cleanup.
 (advice-add 'org-babel-insert-result :before #'spike/where)
 #+end_src
 
+#+RESULTS:
+
+#+call: spike-messages(n=8)
+
+#+RESULTS:
+: Executing Sh code block at position 42279...
+: Code block evaluation complete.
+: spike: result in 20261016T150300--devops-sandbox.org::Spike: bb threads drain stdin, base 20261016T150300--devops-sandbox.org
+: Code block evaluation complete.
+: Saving file /Users/kyle/src/github.com/kpassapk/devops.el/README.md...
+: Wrote /Users/kyle/src/github.com/kpassapk/devops.el/README.md
+: Wrote /Users/kyle/src/github.com/kpassapk/devops.bb/work/20261016T150300--devops-sandbox.org
+: Executing Emacs-Lisp call at position 53086...
+
 #+begin_src emacs-lisp
 (advice-remove 'org-babel-insert-result #'spike/where)
 #+end_src
+
+
+Ran =bb threads drain stdin='s block from
+=org-tree-to-indirect-buffer=: the result is inserted with the
+*indirect* buffer current. The log's =execute= and =result= entries for
+it have =buffer= the indirect buffer's name, =file= the base's, and
+=line= 5: the line in the narrowed indirect buffer, not in the file.
+#+RESULTS:
 
 Either answer works with dispatch by base buffer. The answer goes in
 the ERT for indirect buffers.
@@ -1115,6 +1248,9 @@ Auto-revert calls =revert-buffer= with =preserve-modes=. Does that skip
   (nreverse out))
 #+end_src
 
+#+RESULTS:
+: ((visit . 2) (revert . 4) (revert-preserve-modes . 4))
+
 Each number is a running total. If =revert-preserve-modes= adds
 nothing, auto-revert reads no local variables, but it still needs a
 test. If it adds one, the =:around= advice covers it.
@@ -1136,6 +1272,13 @@ confirm. Time it on a dir about as big as a real one:
                                (secure-hash 'sha256 (current-buffer)))))))))
 #+end_src
 
+#+RESULTS:
+| :files | 2 | :bytes | 122721 | :ms | 3.574 |
+
+=work/= holds only 2 files, so also timed a synthetic dir closer to a
+real one: the workbook, =spec.png=, 40 text files of 27 KB and an
+aly-clojure =--all= bundle, 43 files, 1.7 MB: 17 ms.
+
 Above ~50 ms, cache each file's hash by (size, mtime, inode) and rehash
 only files that changed.
 
@@ -1148,8 +1291,9 @@ From outside Emacs, as Claude would:
   with the diff, and =d= shows all of it.
 - [ ] A dynamic target's block prompts as =block › target-block=. A new
   instance makes every block under that heading prompt once.
-- [ ] Elisp in a header shows a notice, or is refused, as PR 6's spike
-  decided.
+- [ ] Elisp in a header value, own or inherited, refuses the run
+  before org evaluates it (as PR 6's spike decided): a planted =:var
+  x=(message "pwned")= never runs.
 - [ ] A planted =# Local Variables: eval: (message "pwned")= does
   nothing on =M-x revert-buffer= or on auto-revert. =.dir-locals.el= is
   ignored.
@@ -1191,6 +1335,13 @@ docker exec spike-feed wc -l /tmp/e.jsonl
 docker rm -f spike-feed >/dev/null
 #+end_src
 
+#+RESULTS:
+: 20 /tmp/e.jsonl
+
+The =:docker:= heading has no =#+TARGET=, so the block ran sync, without
+a session, and =time='s stderr was dropped. Re-run by hand: 20 =docker
+exec -i= appends in 1.09 s, ~55 ms each.
+
 *** Spike: how soon does a ro-mounted feed see an append?           :docker:
 
 =follow= tails =events.jsonl= through the Docker Desktop file share.
@@ -1202,6 +1353,15 @@ docker run -d --name spike-ro -v "$f":/feed:ro alpine \
 sleep 1; date +%s.%N; echo '{"seq":1}' >> "$f/events.jsonl"; sleep 2
 docker logs spike-ro; docker rm -f spike-ro >/dev/null
 #+end_src
+
+#+RESULTS:
+: 1792464818.731097000
+: 1792464819.
+
+macOS =date= has =%N= here, busybox's does not, so the container line
+has no fraction. Re-run by hand with =docker logs -t= and host
+timestamps to the ms, four appends: seen after 0.96, 0.63, 0.31 and
+0.99 s, i.e. within busybox =tail -F='s 1 s poll.
 
 Expected: the container's timestamp is within about a second of the
 host's.
@@ -1293,6 +1453,14 @@ ln -s /etc/passwd "$s/b/link"
 rsync -r --no-links --exclude '.*' "$s/" "$d/"; (cd "$d" && find . | sort)
 #+end_src
 
+#+RESULTS:
+: openrsync: protocol version 29
+: skipping non-regular file "b/link"
+: .
+: ./a
+: ./b
+: ./b/x.py
+
 Expected: =.=, =./a=, =./b= and =./b/x.py= only. Decide here whether
 files Claude deletes should go too (=--delete=, not
 =--delete-excluded=).
@@ -1342,6 +1510,31 @@ git -C "$REPO" log --oneline -1 refs/sandbox/spike-feature
 git -C "$REPO" update-ref -d refs/sandbox/spike-feature
 #+end_src
 
+#+RESULTS:
+#+begin_example
+Enumerating objects: 3038, done.
+Counting objects: 100% (3038/3038), done.
+Delta compression using up to 14 threads
+Compressing objects: 100% (1148/1148), done.
+Writing objects: 100% (3038/3038), 494.24 KiB | 4.05 MiB/s, done.
+Total 3038 (delta 1554), reused 2696 (delta 1346), pack-reused 0 (from 0)
+Enumerating objects: 1, done.
+Counting objects: 100% (1/1), done.
+Writing objects: 100% (1/1), 413 bytes | 413.00 KiB/s, done.
+Total 1 (delta 0), reused 0 (delta 0), pack-reused 0 (from 0)
+a7c80ede4e105f99a9df35df36838d5bd072f674 refs/heads/spike-feature
+WARNING: terminal is not fully functional
+Press RETURN to continue 
+a7c80ed spike
+sh: t: command not found
+#+end_example
+
+=list-heads= shows =refs/heads/spike-feature= and the fetch landed it in
+=refs/sandbox/spike-feature= (=a7c80ed spike=). But in the session
+=git log= started a pager (=less=, "terminal is not fully
+functional"), which swallowed the next line, so the =update-ref -d=
+cleanup never ran (the ref was deleted by hand afterwards). Session
+blocks need =git --no-pager= or =GIT_PAGER=cat=.
 Expected: =list-heads= shows =refs/heads/spike-feature=, and the fetch
 lands it in =refs/sandbox/=. The command that works goes in the skill.
 
@@ -1394,6 +1587,88 @@ could do itself, or follows text from a feed output.
 List each thing they script, and the attach feature or README section
 that replaces it. Anything with no replacement is a gap in this spec,
 not a reason to keep the script.
+
+On =main= the workbook is empty (Plan and Steps headings only); the
+steps are on aly-infra's =infra-devcontainer= branch (=a1a41dd=).
+
+Step 4, =scripts/devops-feed DIR=, the host feed writer:
+
+- Started by hand in a terminal, runs until stopped. → attach starts
+  =devops-bb publish= as a child; detach, kill or quit closes stdin; the
+  sentinel shows =sandbox: DEAD= (PR 7).
+- Writes =status.json= once, from =devops-bb status=. → the publisher's
+  =status.json=: feed name, workbook, heartbeat, =attached=, =queued=
+  (Feed rule 4, PR 3).
+- =follow --dir DIR --json= on the shared log, to pick one workbook's
+  runs. → the per-buffer subscriber, dispatch by base buffer, no path
+  filter (PR 1, PR 7).
+- On each =result= / =done=, =devops-bb run-output ID= through
+  =emacsclient=, written as =outputs/ID.json= with =.tmp= + =mv=. → the
+  subscriber reads the run by ID in Emacs (PR 2), the publisher writes
+  =outputs/ID.json= atomically, output before event (rules 1, 2, 6).
+- A failed =run-output= is dropped silently. → no =not-found= race:
+  output before event; the publisher retries the sink.
+- Output to =~/.cache/devops/outputs=, beside the shared log, with all
+  of =~/.cache/devops/= mounted ro in the container, so the container
+  sees every workbook's log lines. → a per-workbook feed dir (=--to=),
+  mounted ro; the log never enters the sandbox.
+- Does not cover sync blocks. → Caveats: the subscriber sends
+  =#+RESULTS= with a UUID (PR 7).
+
+Step 5a, the =.devcontainer/bin/devops-bb= shim:
+
+- =status=: =cat status.json=. → feed mode =status= (PR 4).
+- =follow=: the real =devops-bb follow --log= on the host log, its path
+  read from =status.json='s =execution-log=. → feed mode =follow= on
+  =events.jsonl=, with =seq= and =--after=; =status.json= no longer
+  names the log (rule 4).
+- =run-output=: UUID check, then the file or the =not-found= shape. →
+  feed mode =run-output=, same checks (PR 4).
+- Anything else fails "needs Emacs". → the same refusal list, except
+  =modified=, which feed mode now answers from the events (PR 4).
+- Needs =DEVOPS_FEED_DIR=, =DEVOPS_BB_REAL= and =PATH= shadowing. →
+  =DEVOPS_BB_FEED= / =--feed= in the real CLI; no shim.
+
+Step 5b, the =devcontainer.json= plan:
+
+- Worktree mounted rw at the same absolute path. → the workbook dir
+  rw, the repo as Claude's own clone from a bundle (Code, PR 11); same
+  path or =--map= (rule 5); README =docker run= line (PR 9).
+- =aly-root= (sibling deps, =bb.edn= uses =../aly-root/components/*=)
+  and the main checkout's =.git= mounted. → =.git= goes away with the
+  bundle. *Gap:* sibling repos and local deps are not covered: the spec
+  bundles one repo; nothing says how =aly-root= gets in (one bundle per
+  repo, at the right relative path?).
+- =~/.cache/devops/= ro. → the feed's own ro mount (PR 9).
+- =containerEnv=: =DEVOPS_FEED_DIR=, =DEVOPS_BB_REAL= (devops.bb
+  checkout mounted ro). → =DEVOPS_BB_FEED=. *Gap:* how =devops-bb=
+  itself is installed in the image is not said (README container setup,
+  PR 12, should).
+- No tailnet: default bridge, no =tailscale=, no host networking;
+  "allow Anthropic API + github only if feasible". → the tailnet ACL
+  covers nodes only. *Gap:* the spec has no network rule for a local
+  container (egress allow-list, or at least no tailnet), and no check of
+  it like step 4's for the node.
+- No =emacsclient=, no =~/.emacs.d=, no SSH agent mount. → feed mode
+  never starts =emacsclient= (PR 4); the credential check prints =none=,
+  agent included (PR 9, PR 10).
+
+Rules in steps 4-5 (and the Spec section they rely on):
+
+- Operator saves before Claude writes, then =revert-buffer=. →
+  =modified= in feed mode, =global-auto-revert-mode= (Not in scope).
+- Sync blocks have no feed file; operator pastes or turns them async. →
+  Caveats.
+- A =waiting= session prompt is invisible; the operator watches Emacs.
+  → *Gap:* nothing in the feed says a session waits for input (a
+  password or =[y/N]= prompt): =follow= shows only =running=.
+- Git signing via 1Password fails; commit from the host. → Claude
+  commits in the sandbox, and the host pushes =refs/sandbox/*= as
+  fetched. *Gap:* those commits are unsigned; a repo that requires
+  signed commits needs a re-sign (or rebase) step on the host before
+  the push block.
+- =bb scan= hooks stay active in the container. → Not in scope keeps
+  them; nothing to build.
 
 *** Done when
 
