@@ -134,15 +134,44 @@ printed.  Point moves past the match.  BOUND limits the search."
         (setq found (match-beginning 0))))
     found))
 
-(defun devops-bb-scripting--runs (session)
-  "Return every async run in the buffer SESSION, oldest first.
-Each run is an alist: :id, :input as the session echoed it, :output, and
+(defun devops-bb-scripting--find-run (id)
+  "Return the async run ID in the current session buffer, or nil.
+The run is an alist: :id, :input as the session echoed it, :output, and
 :done, nil while the end marker has not been printed.  The output
 starts after the start marker printed and ends at the end marker, with
-the session's prompts removed."
+the session's prompts removed.  Only ID's own markers are searched."
+  (save-excursion
+    (goto-char (point-min))
+    (when (devops-bb-scripting--search-marker "start" id t)
+      (let* ((in-beg (line-beginning-position 2))
+             (in-end (and (devops-bb-scripting--search-marker "end" id t)
+                          (line-beginning-position)))
+             (out-beg (and in-end
+                           (devops-bb-scripting--search-marker "start" id nil)
+                           (line-beginning-position 2)))
+             (out-end (and out-beg
+                           (devops-bb-scripting--search-marker "end" id nil))))
+        `((:id . ,id)
+          (:input . ,(if in-end
+                         (buffer-substring-no-properties in-beg in-end)
+                       ""))
+          (:output . ,(if out-beg
+                          (string-trim
+                           (devops-bb-scripting--unprompt
+                            (buffer-substring-no-properties
+                             (min out-beg (point-max))
+                             (or out-end (point-max)))
+                            comint-prompt-regexp))
+                        ""))
+          (:done . ,(and out-end t)))))))
+
+(defun devops-bb-scripting--runs (session)
+  "Return every async run in the buffer SESSION, oldest first.
+Each run is as `devops-bb-scripting--find-run' returns it.  Every run is
+searched for from the top, so this costs a scan of the session per run:
+for one run whose ID is known, use `devops-bb-scripting--run'."
   (with-current-buffer session
-    (let ((prompt comint-prompt-regexp)
-          ids runs)
+    (let (ids)
       (save-excursion
         (goto-char (point-min))
         (while (re-search-forward
@@ -150,33 +179,47 @@ the session's prompts removed."
                  "start" (concat "\\(" devops-bb-scripting--uuid-regexp "\\)"))
                 nil t)
           (when (devops-bb-scripting--quoted-p (match-beginning 0))
-            (push (match-string-no-properties 1) ids)))
-        (dolist (id (nreverse ids))
-          (goto-char (point-min))
-          (devops-bb-scripting--search-marker "start" id t)
-          (let* ((in-beg (line-beginning-position 2))
-                 (in-end (and (devops-bb-scripting--search-marker "end" id t)
-                              (line-beginning-position)))
-                 (out-beg (and in-end
-                               (devops-bb-scripting--search-marker "start" id nil)
-                               (line-beginning-position 2)))
-                 (out-end (and out-beg
-                               (devops-bb-scripting--search-marker "end" id nil))))
-            (push `((:id . ,id)
-                    (:input . ,(if in-end
-                                   (buffer-substring-no-properties in-beg in-end)
-                                 ""))
-                    (:output . ,(if out-beg
-                                    (string-trim
-                                     (devops-bb-scripting--unprompt
-                                      (buffer-substring-no-properties
-                                       (min out-beg (point-max))
-                                       (or out-end (point-max)))
-                                      prompt))
-                                  ""))
-                    (:done . ,(and out-end t)))
-                  runs))))
-      (nreverse runs))))
+            (push (match-string-no-properties 1) ids))))
+      (mapcar #'devops-bb-scripting--find-run (nreverse ids)))))
+
+(defun devops-bb-scripting--run (session id)
+  "Return what the run ID printed in SESSION, a session buffer or name.
+The answer is `devops-bb-scripting-run-output's.  Only ID's start and
+end markers are searched, not every run in the session, so this is
+cheap enough for a process filter: the sandbox subscriber calls it as
+each run ends."
+  (let* ((buf (get-buffer session))
+         (run (and buf (with-current-buffer buf
+                         (devops-bb-scripting--find-run id)))))
+    `((:session . ,(if (bufferp session) (buffer-name session) session))
+      (:status . ,(cond ((not buf) :no-session)
+                        ((not run) :not-found)
+                        ((alist-get :done run) :done)
+                        (t :running)))
+      (:id . ,id)
+      (:input . ,(and run (string-trim-right (alist-get :input run))))
+      (:output . ,(alist-get :output run)))))
+
+(defun devops-bb-scripting--head-tail (text max-bytes)
+  "Return TEXT cut to at most MAX-BYTES bytes: its head and its tail.
+A TEXT longer than that keeps its first MAX-BYTES/2 bytes and its last
+MAX-BYTES/2, with nothing between them; a cut never splits a character.
+This is the rough cap that keeps a huge output from leaving Emacs; the
+exact cap, and saying where the cut is, belong to the publisher."
+  (if (<= (string-bytes text) max-bytes)
+      text
+    (with-temp-buffer
+      (set-buffer-multibyte t)
+      (insert text)
+      (let* ((half (/ max-bytes 2))
+             (total (1- (position-bytes (point-max))))
+             (head-end (byte-to-position (1+ half)))
+             (tail-byte (1+ (- total half)))
+             (tail-beg (byte-to-position tail-byte)))
+        (when (< (position-bytes tail-beg) tail-byte)
+          (setq tail-beg (1+ tail-beg)))
+        (concat (buffer-substring-no-properties (point-min) head-end)
+                (buffer-substring-no-properties tail-beg (point-max)))))))
 
 (defun devops-bb-scripting--sent-p (body input)
   "Whether INPUT, as a session echoed it, is BODY sent.
@@ -339,17 +382,7 @@ The answer is an alist:
 
 Nothing is run, and no org buffer is read: for #+RESULTS, ask
 `devops-bb-scripting-block-output'."
-  (let* ((buf (get-buffer session))
-         (run (and buf (seq-find (lambda (run) (equal id (alist-get :id run)))
-                                 (devops-bb-scripting--runs buf)))))
-    `((:session . ,session)
-      (:status . ,(cond ((not buf) :no-session)
-                        ((not run) :not-found)
-                        ((alist-get :done run) :done)
-                        (t :running)))
-      (:id . ,id)
-      (:input . ,(and run (string-trim-right (alist-get :input run))))
-      (:output . ,(alist-get :output run)))))
+  (devops-bb-scripting--run session id))
 
 ;;; Sessions
 

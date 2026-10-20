@@ -317,6 +317,77 @@ same block in another session."
                                   "devops:gone" devops-bb-test--run-a))
               :no-session)))
 
+(ert-deftest devops-bb-scripting--run-test ()
+  "One run by its ID: its own input and output, none of the other run's."
+  (devops-bb-test--with-transcript "devops:/srv/app/" (devops-bb-test--transcript t)
+    (let ((out (devops-bb-scripting--run "devops:/srv/app/" devops-bb-test--run-b)))
+      (should (eq (alist-get :status out) :done))
+      (should (equal (alist-get :id out) devops-bb-test--run-b))
+      (should (equal (alist-get :input out) "echo two"))
+      (should (equal (alist-get :output out) "two")))
+    (should (equal (alist-get :output (devops-bb-scripting--run
+                                       (get-buffer "devops:/srv/app/")
+                                       devops-bb-test--run-a))
+                   "one\nls: /nope: No such file"))
+    (let ((out (devops-bb-scripting--run "devops:/srv/app/"
+                                         "33333333-2222-3333-4444-555555555555")))
+      (should (eq (alist-get :status out) :not-found))
+      (should-not (alist-get :input out))
+      (should-not (alist-get :output out))))
+  (devops-bb-test--with-transcript "devops:/srv/app/" (devops-bb-test--transcript)
+    (let ((out (devops-bb-scripting--run "devops:/srv/app/" devops-bb-test--run-b)))
+      (should (eq (alist-get :status out) :running))
+      (should (equal (alist-get :output out) "two")))))
+
+(ert-deftest devops-bb-scripting--head-tail-test ()
+  "A long output keeps its first and last N/2 bytes; a short one is whole."
+  (let* ((text (mapconcat (lambda (i) (format "line %04d" i))
+                          (number-sequence 1 2000) "\n"))
+         (cut (devops-bb-scripting--head-tail text 1000)))
+    (should (> (string-bytes text) 1000))
+    (should (= (string-bytes cut) 1000))
+    (should (string-prefix-p (substring text 0 500) cut))
+    (should (string-suffix-p (substring text -500) cut))
+    (should (string-prefix-p "line 0001\n" cut))
+    (should (string-suffix-p "line 2000" cut))
+    (should (equal (devops-bb-scripting--head-tail text (string-bytes text)) text)))
+  ;; A cut never splits a character: three bytes each, so less than N.
+  (let ((cut (devops-bb-scripting--head-tail (make-string 2000 ?€) 1000)))
+    (should (<= (string-bytes cut) 1000))
+    (should (equal cut (make-string (* 2 (/ 500 3)) ?€)))))
+
+(defun devops-bb-test-bench (&optional runs lines)
+  "Time one run by ID against the full scan, in a synthetic session.
+RUNS runs (default 500) of LINES output lines each (default 20); the
+ID asked for is the last run's, as the subscriber asks as a run ends.
+Run in batch:
+
+  emacs --batch -L ... --eval \"(require \\='devops-bb-test)\" \\
+    -f devops-bb-test-bench"
+  (let* ((runs (or runs 500))
+         (lines (or lines 20))
+         (ids (mapcar (lambda (i) (format "%08x-2222-3333-4444-555555555555" i))
+                      (number-sequence 1 runs)))
+         (output (mapconcat (lambda (i) (format "%sout %d\n" devops-bb-test--prompt i))
+                            (number-sequence 1 lines) "")))
+    (devops-bb-test--with-transcript "devops-bench-session"
+        (mapconcat (lambda (id) (devops-bb-test--run-text id "echo hi" output t))
+                   ids "")
+      (let* ((id (car (last ids)))
+             (old (lambda ()
+                    (seq-find (lambda (run) (equal id (alist-get :id run)))
+                              (devops-bb-scripting--runs
+                               (get-buffer "devops-bench-session")))))
+             (new (lambda () (devops-bb-scripting--run "devops-bench-session" id)))
+             (n-old 3)
+             (n-new 100)
+             (ms (lambda (fn n) (/ (* 1000.0 (car (benchmark-call fn n))) n))))
+        (cl-assert (equal (alist-get :output (funcall old))
+                          (alist-get :output (funcall new))))
+        (message "bench: %d runs, %d chars; full scan %.1f ms, by ID %.2f ms"
+                 runs (buffer-size (get-buffer "devops-bench-session"))
+                 (funcall ms old n-old) (funcall ms new n-new))))))
+
 (ert-deftest devops-bb-scripting--pending-prompt-test ()
   "A session ending partway through a line, not on its prompt, is waiting."
   (devops-bb-test--with-transcript "devops-test-session"
