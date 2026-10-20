@@ -19,8 +19,9 @@
   (let [{:keys [out err exit]}
         (p/shell {:out :string :err :string :continue true}
                  "emacsclient" "--eval"
-                 (str "(base64-encode-string"
-                      " (encode-coding-string (json-encode " form ") 'utf-8) t)"))]
+                 ;; An Emacs without devops-bb loaded may not have json.
+                 (str "(progn (require 'json) (base64-encode-string"
+                      " (encode-coding-string (json-encode " form ") 'utf-8) t))"))]
     (when-not (zero? exit)
       (throw (ex-info (str/trim (str/replace (str err out) #"^\*ERROR\*: " "")) {})))
     (-> (str/trim out)

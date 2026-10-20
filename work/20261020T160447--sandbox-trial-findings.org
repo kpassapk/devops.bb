@@ -1,0 +1,269 @@
+#+TITLE: Sandbox trial: findings
+#+CATEGORY: work
+#+PROPERTY: header-args:sh :results output
+#+TARGET: .. (local)
+
+A run through [[file:../doc/getting_started.org][doc/getting_started.org]] on 2026-10-20, steps 1–8, with
+the reference Emacs (=emacs -nw --init-directory=emacs/reference=, Emacs
+32.0.50, Org 9.8.7) in one tmux window and =podman exec -it trial-box
+claude= in another.  Two questions going in:
+
+1. Should Emacs save the workbook after every block run?
+2. Why does a dependent block (=:var foo=foo=) run twice?
+
+Short answers: yes, save when the result lands; and the double run is
+Org's async filter re-resolving =:var=, which devops.el turns on for
+every targeted block.
+
+* Summary
+
+| # | Finding                                                     | Severity | Where                                   |
+|---+-------------------------------------------------------------+----------+-----------------------------------------|
+| 1 | Every run leaves the buffer modified; Claude must stop      | friction | devops-bb log / review                  |
+| 2 | =:var= dependency runs again when an async result arrives   | bug      | Org =ob-comint.el=, via devops.el async |
+| 3 | Untagged block shows as =execute= error in the feed         | minor    | =devops/bb/log.clj= =block-output=      |
+| 4 | Suspended state shows only after a run attempt              | minor    | =devops-bb-review--check-dir=           |
+| 5 | =modify= event right before each =execute= misleads Claude  | minor    | =devops/bb/log.clj= =on-change=         |
+| 6 | Private backup dir lands in the repo, staged                | leak     | =devops-bb-review--private-dir=         |
+| 7 | Detach turns backups back on in the workbook dir            | minor    | =devops-bb-sandbox-detach=              |
+| 8 | Old =/feed/outputs= survive a new attach                    | minor    | publisher                               |
+| 9 | Prompt counter always says "prompt 1"                       | cosmetic | ob-confirm-posframe                     |
+
+* 1. Save after each run                                               :local:
+
+After any block runs, the inserted =#+RESULTS= leave the buffer
+modified.  The skill tells Claude to check =devops-bb modified= before
+writing, and it did:
+
+#+begin_example
+● I didn't add the block yet, because Emacs reports unsaved edits in
+  /work/trial.org and writing now could clash with them. Please save the
+  buffer (C-x C-s) and tell me, and I'll add it.
+#+end_example
+
+I saved.  The feed got a =save= event (seq 5), but Claude had stopped
+=follow= after its first answer, so nothing moved until I typed
+"Saved."  That round trip repeats after every run.
+
+Proposal: in an attached buffer, save when the result is inserted, not
+when the run starts.  Async results are inserted by
+=org-babel-comint-async-filter=, which =devops-bb-log--during-async-filter=
+already wraps (=devops/bb/log.clj=, around line 178); sync results go
+through =org-babel-after-execute-hook=, where =devops-bb-log--on-execute=
+sits.  Saving there, before the =result= event is published, means
+Claude sees the output and a clean buffer together.  It is safe while
+attached: lock files, backups and auto-saves are already redirected.
+
+Open question: the save writes the file the agent also writes.  If
+Claude wrote between the run starting and the result arriving, the save
+would overwrite it; =save-buffer= asks first ("changed on disk"), which
+is the prompt we want, but it lands inside a process filter.
+
+* 2. A dependency runs twice                                           :local:
+
+** What happens
+
+=trial.org= has:
+
+#+begin_example
+,#+name: foo
+,#+begin_src sh :results output
+notice ob-posframe confirms foo twice
+,#+end_src
+
+,#+begin_src sh :var foo=foo
+df -h
+,#+end_src
+#+end_example
+
+A trace on =org-babel-execute:sh= over one =C-c C-c= on the second
+block:
+
+#+begin_example
+15:57:59.644  notice ob-posframe confirms foo twice   :session none
+15:57:59.693  df -h                                   :session devops:/tmp/
+15:57:59.698  notice ob-posframe confirms foo twice   :session none
+#+end_example
+
+- *Detached*: three prompts, =foo=, the block, then =foo= again after
+  the block has finished.  This is the "confirms foo twice" in the note.
+- *Attached*: two prompts.  The second =foo= runs silently, because the
+  review cache matches what was just approved.
+- Answering =n= to the late prompt signals inside the process filter
+  (=error in process filter: … Evaluation of chain cancelled at foo=),
+  so the block's output is never inserted and =#+RESULTS:= keeps the
+  placeholder UUID.
+- Neither run of =foo= is in =executions.jsonl= or the feed.
+
+** Cause
+
+The second call's backtrace, trimmed:
+
+#+begin_example
+org-babel-ref-resolve("foo")
+org-babel-ref-parse("foo=foo")
+org-babel-process-params(... (:var . "foo=foo") ...)
+org-babel-get-src-block-info()                   ; no LIGHT
+org-babel-comint-async-filter("ob_comint_async_shell_end_…")
+devops-bb-log--during-async-filter(...)
+comint-output-filter(#<process shell> ...)
+#+end_example
+
+=org-babel-comint-async-filter= calls =org-babel-get-src-block-info=
+without =light= to get the result params for insertion.  That runs
+=org-babel-process-params=, which resolves every =:var= reference, and
+resolving =foo= executes it.  The =:file= branch calls it twice, so
+there a dependency runs three times.
+
+#+begin_src sh :dir /Applications/Emacs.app/Contents/Resources/lisp/org
+grep -n "org-babel-get-src-block-info" ob-comint.el
+#+end_src
+
+#+RESULTS:
+: 321:                                (let* ((info (org-babel-get-src-block-info))
+: 329:                                             2 (org-babel-get-src-block-info))
+: 371:                                   (let* ((info (org-babel-get-src-block-info))
+
+This is upstream Org, but plain Org users rarely hit it: it needs
+=:session= and =:async= and =:var= on one block.  devops.el injects
+=:session= on every targeted block and =devops-enable-session-async= is
+=t= in the reference init, so here every targeted =:var= block hits it.
+
+** Fix
+
+- Report upstream: the filter only needs =:result-params= and the
+  block's location; it should not evaluate references.
+- Locally: while the async filter inserts a result, make =:var=
+  references resolve without executing.  The filter is already wrapped
+  by =devops-bb-log--during-async-filter=; devops.el, which enables
+  async, is arguably the better home.  =light= info alone won't do,
+  since its params lack =:result-params=.
+
+** Repro
+
+Load the trace into the Emacs that runs the workbook, run the
+=:var foo=foo= block, then read =trial--sh-calls=.
+
+#+begin_src elisp :results none
+  (defvar trial--sh-calls nil)
+  (defun trial--trace-sh (body params)
+    (push (list (format-time-string "%T.%3N")
+                (string-trim body)
+                (cdr (assq :session params)))
+          trial--sh-calls))
+  (advice-add 'org-babel-execute:sh :before #'trial--trace-sh)
+#+end_src
+
+#+begin_src elisp
+  (reverse trial--sh-calls)
+#+end_src
+
+#+begin_src elisp :results none
+  (advice-remove 'org-babel-execute:sh #'trial--trace-sh)
+  (setq trial--sh-calls nil)
+#+end_src
+
+* Runbook results
+
+| Step | Check                                                         | Result                                                    |
+|------+---------------------------------------------------------------+-----------------------------------------------------------|
+| 4    | Attach; mode line =sandbox: trial=; status =attached:true=    | ok                                                        |
+| 6    | Claude runs =status=, starts =follow=, checks =modified=      | ok; =follow= as a Monitor                                 |
+| 6    | Buffer reloads with Claude's block                            | ok                                                        |
+| 6    | Posframe with "not run since attach"; =d= opens the notices   | ok; real child frame in tty (Emacs 32); =d= has no diff   |
+| 6    | Claude reads the run, writes and tests =summary.py= itself    | ok; it also avoided the =foo= dependency on its own       |
+| 6    | "files changed … summary.py (new)"                            | not seen: =summary.py= predates attach, unchanged         |
+| 6    | Unchanged block re-runs without a prompt                      | ok                                                        |
+| 7    | =.envrc= suspends; runs refused; =rm= resumes                 | ok, but see finding 4                                     |
+| 7    | =ln -s /etc /work/etc= suspends                               | ok                                                        |
+| 7    | =:var x=(shell-command …)= refused; no =/tmp/pwned=           | ok: "elisp in header :var x"                              |
+| 7    | Edited block prompts "changed since you ran it: +n/-m"        | ok: =+1/-1=, =d= shows the diff                           |
+| 8    | Detach → =attached:false=                                     | ok; Claude wasn't following, so its notice wasn't checked |
+| 8    | Re-attach, quit Emacs → =attached:false=                      | ok; Emacs asks "Active processes exist" first             |
+
+* Other findings
+
+** 3. An untagged block is an =execute= error in the feed
+
+Claude's "Filesystems over 50% full" heading had no target tag, so it
+ran in the workbook dir.  It worked, but the feed event carried
+=:error "Not run on a #+TARGET"=, from =block-output= in
+=emacs/devops/bb/log.clj:145=.  Claude worked it out, and said every
+rerun will be labelled error.  The review's target line was blank too:
+it didn't say where the block would run.
+
+** 4. Suspension shows late in the mode line
+
+=devops-bb-review--check-dir= only runs on a run.  After
+=touch /work/.envrc= the mode line stayed =sandbox: trial= until I
+tried a run; after =rm= it stayed =SUSPENDED= until the next run.  Runs
+were refused correctly the whole time.  A file-notify watch on the dir,
+or a check on auto-revert, would keep it current.
+
+** 5. A =modify= event precedes each =execute=
+
+Each run publishes =modify= 1 ms before =execute= (the first change
+since the save).  Claude read it as "you're editing /work/trial.org".
+It goes away with finding 1, or could be dropped when a run caused it.
+
+** 6. The private backup dir is in the repo
+
+=devops-bb-review--private-dir= uses =locate-user-emacs-file=, which
+for the reference Emacs is =emacs/reference/=.  The attached-mode
+redirect worked, but the backup it wrote holds workbook output, and
+=emacs/reference/.gitignore= doesn't cover it.  It is now staged:
+
+#+begin_src sh
+git status --short emacs/reference
+#+end_src
+
+#+RESULTS:
+: A  emacs/reference/.gitignore
+: A  emacs/reference/devops-bb-sandbox/backups/!Users!kyle!sandbox-trial!trial.org~
+: A  emacs/reference/init.el
+: A  emacs/reference/tramp
+: ?? emacs/reference/projects.eld
+
+Fixed: =/devops-bb-sandbox/=, =/tramp= and =/projects.eld= are now in
+that =.gitignore=, and the backup and =tramp= are unstaged.
+=#+RESULTS= can hold server output, so the backup should never be
+committed.  The underlying risk remains for anyone whose
+=user-emacs-directory= is inside a repo.
+
+** 7. Detach turns backups back on
+
+=devops-bb-sandbox-detach= kills the local =backup-directory-alist=.
+My save while detached put =trial.org~= into =~/sandbox-trial=, and it
+stays in the agent's dir after re-attaching.  Not a dotfile, so it
+doesn't suspend.  Consider keeping the redirect for the buffer's life.
+
+** 8. Stale outputs survive a new attach
+
+After re-attaching, =events.jsonl= restarted at seq 1 but
+=/feed/outputs/= still held a run from an earlier feed.
+
+** 9. Every prompt says "prompt 1"
+
+In the =foo= chain each posframe was "prompt 1", even the second and
+third.
+
+** Two Emacsen on one log
+
+My main Emacs also visited =~/sandbox-trial/trial.org= and logs to the
+same =executions.jsonl=, so the host log had each =revert= twice.  The
+feed only carries the attached Emacs's events.
+
+* Getting started doc
+
+- Numbering skips: "1. Start sandbox", "Attach", then "5.".
+- The prompt has "write/work/summary.py" (missing space).
+- Step 7 says =docker exec=; the setup uses podman.
+- =trial.org= links devops.el; the heredoc in "Create workbook" links
+  devops.bb.
+
+* Trial artifacts
+
+- =trial.org= after the trial (Claude's blocks plus my test edits):
+  =/private/tmp/claude-501/-Users-kyle-sandbox-trial/1f4543c0-ac47-4993-9e54-c4b2193aa85c/scratchpad/trial.after.org=
+- =~/sandbox-trial/trial.org= was restored to its original.
+- =trial-box= is still running.
