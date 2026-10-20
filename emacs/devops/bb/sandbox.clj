@@ -53,7 +53,10 @@
        "Named sinks a workbook can be attached to: ((NAME . PLIST) ...).
 PLIST holds the publisher's flags:
 
-  :to DIR          the feed's directory, required
+  :to DIR          the feed's directory, required; with :via, a path
+                   where the command runs, given as is
+  :via CMD         a command, shell words, that runs `sh' where the
+                   feed is, e.g. \"docker exec -i box\"
   :map ALIST       ((HOST-DIR . SANDBOX-DIR) ...): paths as the sandbox
                    sees them, for --map
   :max-lines N     the publisher's caps on one output
@@ -211,12 +214,14 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
   "The publisher's flags for the sink FLAGS and the feed FEED."
   [flags feed]
   (let [to (el/plist-get flags :to)
+        via (el/plist-get flags :via)
         max-lines (el/plist-get flags :max-lines)
         max-bytes (el/plist-get flags :max-bytes)]
-    (when (or (el/plist-get flags :via) (el/plist-get flags :ssh))
-      (el/user-error "Sinks with :via or :ssh are not supported yet"))
+    (when (el/plist-get flags :ssh)
+      (el/user-error "Sinks with :ssh are not supported yet"))
     (when-not to (el/user-error "The sink has no :to"))
-    (concat ["--to" (el/expand-file-name to)]
+    (concat ["--to" (if via to (el/expand-file-name to))]
+            (when via ["--via" via])
             (mapcat (fn [m]
                       ["--map" (str (el/directory-file-name (el/expand-file-name (el/car m)))
                                     "=" (el/cdr m))])
