@@ -10,7 +10,8 @@
    [cheshire.core :as json]
    [clojure.string :as str]
    [devops.bb.emacs :as emacs]
-   [devops.bb.log :as log]))
+   [devops.bb.log :as log]
+   [devops.bb.publish :as publish]))
 
 (defn- elisp-str [s] (pr-str (str s)))
 
@@ -115,6 +116,18 @@
                         custom-id (format "(devops-drift-custom-id %s %s)"
                                           (elisp-str (abs file)) (elisp-str custom-id))
                         :else     (format "(devops-drift-all %s)" (elisp-str (abs file)))))))
+
+;;; Publishing a feed
+
+(defn publish
+  "Push the JSON lines on stdin to the feed at --to, for one sandbox"
+  {:org.babashka/cli {:require [:to]
+                      :coerce {:map [] :max-lines :long :max-bytes :long}
+                      :restrict [:to :map :max-lines :max-bytes :name]}}
+  [opts]
+  (try
+    (publish/run opts)
+    (catch clojure.lang.ExceptionInfo e (fail (ex-message e)))))
 
 ;;; Following the log
 
