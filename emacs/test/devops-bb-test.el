@@ -803,6 +803,436 @@ They still get none from a run that is not the user's."
       (devops-bb-log-unsubscribe f b)
       (should (eq (gethash b devops-bb-log--buffer-subscribers :none) :none)))))
 
+;;; Sandbox
+
+(defvar ob-confirm-posframe-mode)
+
+(defconst devops-bb-test--repo
+  (file-name-directory
+   (directory-file-name
+    (file-name-directory
+     (directory-file-name
+      (file-name-directory (or load-file-name buffer-file-name))))))
+  "This checkout, holding bb.edn and bin/devops-bb.")
+
+(defun devops-bb-test--fake-publish (&optional after)
+  "A publisher that records under its --to DIR: its flags in DIR/args,
+its stdin in DIR/stdin.  AFTER, sh, runs once stdin closes."
+  (list "sh" "-c"
+        (concat "mkdir -p \"$2\" && printf '%s\\n' \"$@\" > \"$2/args\""
+                " && cat >> \"$2/stdin\"" (when after (concat "; " after)))
+        "fake-publish"))
+
+(defmacro devops-bb-test--with-sandbox (root-var &rest body)
+  "Run BODY with ROOT-VAR a temp dir for workbooks and their feeds.
+The fake publisher, no sinks yet, `ob-confirm-posframe-mode' on and no
+execution log.  Afterwards every buffer is detached and every buffer
+visiting a file under ROOT-VAR killed."
+  (declare (indent 1))
+  `(let* ((,root-var (file-name-as-directory
+                      (file-truename (make-temp-file "devops-sandbox-" t))))
+          (devops-bb-sandbox-sinks nil)
+          (devops-bb-sandbox-publish-command (devops-bb-test--fake-publish))
+          (ob-confirm-posframe-mode t)
+          (devops-bb-execution-log nil)
+          (org-confirm-babel-evaluate nil))
+     (unwind-protect
+         (progn ,@body)
+       (devops-bb-sandbox--on-kill-emacs)
+       (let ((kill-buffer-query-functions nil))
+         (dolist (buf (buffer-list))
+           (when (and (buffer-live-p buf)
+                      (buffer-file-name buf)
+                      (string-prefix-p ,root-var (buffer-file-name buf)))
+             (with-current-buffer buf (set-buffer-modified-p nil))
+             (kill-buffer buf))))
+       (delete-directory ,root-var t))))
+
+(defun devops-bb-test--sink (root name &rest flags)
+  "Add the sink NAME, its feed ROOT/feeds/NAME, with FLAGS; return NAME."
+  (push (cons name (append (list :to (expand-file-name (concat "feeds/" name) root))
+                           flags))
+        devops-bb-sandbox-sinks)
+  name)
+
+(defun devops-bb-test--visit (root name text)
+  "Visit ROOT/NAME/NAME.org, written with TEXT first."
+  (let ((file (expand-file-name (format "%s/%s.org" name name) root)))
+    (make-directory (file-name-directory file) t)
+    (write-region text nil file nil 'silent)
+    (find-file-noselect file)))
+
+(defun devops-bb-test--wait (pred &optional secs)
+  "Wait up to SECS seconds, default 20, for PRED to return non-nil."
+  (let ((deadline (+ (float-time) (or secs 20))))
+    (while (and (not (funcall pred)) (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (funcall pred)))
+
+(defun devops-bb-test--detach (buffer)
+  "Detach BUFFER and wait for its publisher to exit."
+  (let ((proc (gethash :process (devops-bb-sandbox-attachment buffer))))
+    (with-current-buffer buffer (devops-bb-sandbox-detach))
+    (should (devops-bb-test--wait (lambda () (not (process-live-p proc)))))))
+
+(defun devops-bb-test--json-lines (file)
+  "FILE's JSON lines, as alists; nil when it does not exist."
+  (when (file-exists-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (mapcar (lambda (line)
+                (json-parse-string line :object-type 'alist
+                                   :null-object nil :false-object :false))
+              (split-string (buffer-string) "\n" t)))))
+
+(defun devops-bb-test--stdin (root sink)
+  "What the fake publisher of SINK got on stdin, as alists."
+  (devops-bb-test--json-lines (expand-file-name (format "feeds/%s/stdin" sink) root)))
+
+(defun devops-bb-test--events (lines &optional event)
+  "The LINES whose event is EVENT, or all but the status lines."
+  (seq-filter (lambda (l) (if event
+                              (equal (alist-get 'event l) event)
+                            (not (equal (alist-get 'event l) "status"))))
+              lines))
+
+(defconst devops-bb-test--elisp-block
+  "* Run\n\n#+begin_src emacs-lisp\n(+ 1 2)\n#+end_src\n"
+  "A workbook with one sync block, on line 3.")
+
+(ert-deftest devops-bb-sandbox-attach-test ()
+  "Attach starts the publisher with the sink's flags and sends a status
+line, then the buffer's entries; a sync run carries its #+RESULTS.
+Detach closes stdin and undoes the attach."
+  (devops-bb-test--with-sandbox root
+    (devops-bb-test--sink root "a" :map '(("/h/w/" . "/work")) :max-lines 10)
+    (let ((buf (devops-bb-test--visit root "wb" devops-bb-test--elisp-block)))
+      (with-current-buffer buf
+        (devops-bb-sandbox-attach "a" "my-feed")
+        (should (devops-bb-sandbox-attachment))
+        (should backup-by-copying)
+        (should (string-match-p "sandbox: my-feed" (devops-bb-sandbox--mode-line)))
+        (should (member devops-bb-sandbox--mode-line-entry mode-line-misc-info))
+        (should (equal (devops-bb-test--run-block) 3))
+        (revert-buffer t t)
+        (should backup-by-copying)
+        (devops-bb-test--detach buf)
+        (should-not (devops-bb-sandbox-attachment))
+        (should-not (local-variable-p 'backup-by-copying))
+        (should-not (devops-bb-sandbox--mode-line))
+        (should-not (memq 'devops-bb-sandbox--on-kill-buffer kill-buffer-hook)))
+      (should (equal (split-string (with-temp-buffer
+                                     (insert-file-contents
+                                      (expand-file-name "feeds/a/args" root))
+                                     (buffer-string))
+                                   "\n" t)
+                     (list "--to" (expand-file-name "feeds/a" root)
+                           "--map" "/h/w=/work" "--max-lines" "10"
+                           "--name" "my-feed")))
+      (let* ((lines (devops-bb-test--stdin root "a"))
+             (status (car lines))
+             (run (car (devops-bb-test--events lines "execute")))
+             (out (alist-get 'output run)))
+        (should (equal (alist-get 'event status) "status"))
+        (should (equal (alist-get 'file status) (buffer-file-name buf)))
+        (should (eq (alist-get 'devops-mode status) t))
+        (should (eq (alist-get 'sync run) t))
+        (should (equal (alist-get 'status run) "done"))
+        (should (equal (alist-get 'line run) 3))
+        (should (string-match-p (concat "\\`" devops-bb-scripting--uuid-regexp "\\'")
+                                (alist-get 'id run)))
+        (should (equal out `((session) (status . "done") (id . ,(alist-get 'id run))
+                             (input . "(+ 1 2)") (output . "3"))))
+        (should (equal (mapcar (lambda (l) (alist-get 'event l)) (cdr lines))
+                       '("modify" "execute" "revert")))))))
+
+(ert-deftest devops-bb-sandbox-attach-refuses-test ()
+  "Attach refuses without ob-confirm-posframe-mode, a remote file, a sink
+in use or not supported; asks before replacing; warns of other .org files."
+  (devops-bb-test--with-sandbox root
+    (devops-bb-test--sink root "a")
+    (devops-bb-test--sink root "b")
+    (devops-bb-test--sink root "c" :via "docker exec -i box")
+    (let ((one (devops-bb-test--visit root "one" devops-bb-test--elisp-block))
+          (two (devops-bb-test--visit root "two" devops-bb-test--elisp-block))
+          (warnings nil))
+      (with-current-buffer one
+        (let ((ob-confirm-posframe-mode nil))
+          (should-error (devops-bb-sandbox-attach "a" "one") :type 'user-error))
+        (should-error (devops-bb-sandbox-attach "c" "one") :type 'user-error)
+        (should-error (devops-bb-sandbox-attach "nope" "one") :type 'user-error)
+        (should-not (devops-bb-sandbox-attachment))
+        (devops-bb-sandbox-attach "a" "one"))
+      (with-current-buffer two
+        (should-error (devops-bb-sandbox-attach "a" "two") :type 'user-error)
+        (write-region "" nil (expand-file-name "two/other.org" root) nil 'silent)
+        (cl-letf (((symbol-function 'display-warning)
+                   (lambda (_type msg &rest _) (push msg warnings))))
+          (devops-bb-sandbox-attach "b" "two"))
+        (should (string-match-p "other\\.org" (car warnings))))
+      (with-current-buffer one
+        (let ((proc (gethash :process (devops-bb-sandbox-attachment))))
+          (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) nil)))
+            (should-error (devops-bb-sandbox-attach "a" "again") :type 'user-error))
+          (should (eq proc (gethash :process (devops-bb-sandbox-attachment))))
+          (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t)))
+            (devops-bb-sandbox-attach "a" "again"))
+          (should (devops-bb-test--wait (lambda () (not (process-live-p proc)))))
+          (should (equal (gethash :feed (devops-bb-sandbox-attachment)) "again")))))
+    (with-temp-buffer
+      (org-mode)
+      (setq buffer-file-name "/ssh:nohost:/tmp/wb.org")
+      (should-error (devops-bb-sandbox-attach "a" "remote") :type 'user-error)
+      (setq buffer-file-name nil))))
+
+(ert-deftest devops-bb-sandbox-two-buffers-test ()
+  "Two attached buffers give two feeds, and neither gets the other's."
+  (devops-bb-test--with-sandbox root
+    (devops-bb-test--sink root "a")
+    (devops-bb-test--sink root "b")
+    (let ((one (devops-bb-test--visit root "one" devops-bb-test--elisp-block))
+          (two (devops-bb-test--visit root "two" devops-bb-test--elisp-block)))
+      (with-current-buffer one (devops-bb-sandbox-attach "a" "one"))
+      (with-current-buffer two (devops-bb-sandbox-attach "b" "two"))
+      (dotimes (_ 2)
+        (with-current-buffer one (devops-bb-test--run-block))
+        (with-current-buffer two (devops-bb-test--run-block)))
+      (devops-bb-test--detach one)
+      (devops-bb-test--detach two)
+      (pcase-dolist (`(,sink ,buf) `(("a" ,one) ("b" ,two)))
+        (let ((lines (devops-bb-test--stdin root sink)))
+          (should (= 2 (length (devops-bb-test--events lines "execute"))))
+          (dolist (l lines)
+            (should (equal (alist-get 'file l) (buffer-file-name buf)))))))))
+
+(ert-deftest devops-bb-sandbox-kill-test ()
+  "Killing the buffer sends its kill, then detaches: stdin closes."
+  (devops-bb-test--with-sandbox root
+    (devops-bb-test--sink root "a")
+    (let ((buf (devops-bb-test--visit root "wb" devops-bb-test--elisp-block)))
+      (with-current-buffer buf (devops-bb-sandbox-attach "a" "wb"))
+      (let ((proc (gethash :process (devops-bb-sandbox-attachment buf))))
+        (with-current-buffer buf
+          (goto-char (point-max))
+          (insert "edit\n")
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer)))
+        (should (devops-bb-test--wait (lambda () (not (process-live-p proc)))))
+        (should (zerop (hash-table-count devops-bb-sandbox--registry)))
+        (should (equal (mapcar (lambda (l) (alist-get 'event l))
+                               (devops-bb-test--stdin root "a"))
+                       '("status" "modify" "kill")))))))
+
+(ert-deftest devops-bb-sandbox-rename-test ()
+  "A rename keeps the feed: a status line names the new file, and the
+next event carries it."
+  (devops-bb-test--with-sandbox root
+    (devops-bb-test--sink root "a")
+    (let* ((buf (devops-bb-test--visit root "wb" devops-bb-test--elisp-block))
+           (old (buffer-file-name buf))
+           (new (expand-file-name "wb/20261019T000000--renamed.org" root)))
+      (with-current-buffer buf
+        (devops-bb-sandbox-attach "a" "wb")
+        (set-visited-file-name new)
+        (should (equal (gethash :feed (devops-bb-sandbox-attachment)) "wb"))
+        (should backup-by-copying)
+        (devops-bb-test--run-block))
+      (devops-bb-test--detach buf)
+      (let ((lines (devops-bb-test--stdin root "a")))
+        (should (equal (mapcar (lambda (l) (alist-get 'file l))
+                               (devops-bb-test--events lines "status"))
+                       (list old new)))
+        (should (equal (alist-get 'file (car (devops-bb-test--events lines "execute")))
+                       new))))))
+
+(ert-deftest devops-bb-sandbox-indirect-test ()
+  "A run from an indirect buffer reaches the base buffer's feed, with the
+line in the file.  Killing the indirect buffer sends nothing, and the
+base stays attached."
+  (devops-bb-test--with-sandbox root
+    (devops-bb-test--sink root "a")
+    (let ((buf (devops-bb-test--visit
+                root "wb" (concat "* Notes\n\ntext\n\n" devops-bb-test--elisp-block))))
+      (with-current-buffer buf (devops-bb-sandbox-attach "a" "wb"))
+      (let ((indirect (make-indirect-buffer buf "devops-bb-sandbox-indirect" t)))
+        (with-current-buffer indirect
+          (goto-char (point-min))
+          (re-search-forward "^\\* Run")
+          (org-narrow-to-subtree)
+          (should (string-match-p "sandbox: wb" (devops-bb-sandbox--mode-line)))
+          (should (equal (devops-bb-test--run-block) 3)))
+        (should (with-current-buffer buf (buffer-modified-p)))
+        (let ((kill-buffer-query-functions nil))
+          (kill-buffer indirect)))
+      (should (devops-bb-sandbox-attachment buf))
+      (devops-bb-test--detach buf)
+      (let* ((lines (devops-bb-test--stdin root "a"))
+             (run (car (devops-bb-test--events lines "execute"))))
+        (should (equal (alist-get 'buffer run) "devops-bb-sandbox-indirect"))
+        (should (equal (alist-get 'file run) (buffer-file-name buf)))
+        (should (equal (alist-get 'line run) 7))
+        (should (equal (alist-get 'output (alist-get 'output run)) "3"))
+        (should-not (devops-bb-test--events lines "kill"))))))
+
+(ert-deftest devops-bb-sandbox-entries-test ()
+  "An async run's result carries its output, its execute none; an entry
+with an error carries none."
+  (let ((devops-enable-session-async t))
+    (devops-bb-test--with-local-target target
+      (let ((session (car (devops-target-sessions target))))
+        (unwind-protect
+            (devops-bb-test--with-sandbox root
+              (devops-bb-test--sink root "a")
+              (let ((buf (devops-bb-test--visit
+                          root "wb"
+                          (format (concat "#+TARGET: %s (local)\n\n"
+                                          "* Run\t\t:local:\n\n"
+                                          "#+begin_src sh\necho hi\n#+end_src\n\n"
+                                          "* Deploy\n")
+                                  target))))
+                (with-current-buffer buf
+                  (devops-bb-sandbox-attach "a" "wb")
+                  (let ((uuid (devops-bb-test--run-block)))
+                    (should (devops-bb-test--wait
+                             (lambda ()
+                               (devops-bb-test--events
+                                (devops-bb-test--stdin root "a") "result"))))
+                    (goto-char (point-max))
+                    (should-error (devops-tangle) :type 'user-error)
+                    (devops-bb-test--detach buf)
+                    (let* ((lines (devops-bb-test--stdin root "a"))
+                           (execute (car (devops-bb-test--events lines "execute")))
+                           (result (car (devops-bb-test--events lines "result")))
+                           (tangle (car (devops-bb-test--events lines "tangle"))))
+                      (should (equal (alist-get 'id execute) uuid))
+                      (should (equal (alist-get 'status execute) "running"))
+                      (should-not (assq 'sync execute))
+                      (should-not (assq 'output execute))
+                      (should (equal (alist-get 'id result) uuid))
+                      (should (equal (alist-get 'output result)
+                                     `((session . ,session) (status . "done")
+                                       (id . ,uuid) (input . "echo hi")
+                                       (output . "hi"))))
+                      (should (alist-get 'error tangle))
+                      (should-not (assq 'output tangle)))))))
+          (when-let* ((b (get-buffer session)))
+            (let ((kill-buffer-query-functions nil))
+              (kill-buffer b))))))))
+
+(ert-deftest devops-bb-sandbox-rough-cap-test ()
+  "An output over the rough cap keeps its head and tail, and says how
+big it was."
+  (let* ((text (mapconcat (lambda (i) (format "line %04d" i))
+                          (number-sequence 1 2000) "\n"))
+         (cut (devops-bb-sandbox--rough-cap
+               (cljbang-hash-map :id "x" :output text) 1000)))
+    (should (= (string-bytes (gethash :output cut)) 1000))
+    (should (eq (gethash :truncated cut) t))
+    (should (= (gethash :lines cut) 2000))
+    (should (= (gethash :bytes cut) (string-bytes text)))
+    (should (equal (gethash :output (devops-bb-sandbox--rough-cap
+                                     (cljbang-hash-map :output "short") 1000))
+                   "short"))))
+
+(ert-deftest devops-bb-sandbox-dead-test ()
+  "A publisher that dies shows DEAD; attach offers to restart it."
+  (devops-bb-test--with-sandbox root
+    (devops-bb-test--sink root "a")
+    (let ((buf (devops-bb-test--visit root "wb" devops-bb-test--elisp-block))
+          (warnings nil))
+      (with-current-buffer buf
+        (cl-letf (((symbol-function 'display-warning)
+                   (lambda (_type msg &rest _) (push msg warnings))))
+          (let ((devops-bb-sandbox-publish-command '("sh" "-c" "exit 3")))
+            (devops-bb-sandbox-attach "a" "wb"))
+          (should (devops-bb-test--wait
+                   (lambda () (gethash :dead (devops-bb-sandbox-attachment))))))
+        (should (string-match-p "sandbox: DEAD" (devops-bb-sandbox--mode-line)))
+        (should (string-match-p "feed wb died" (car warnings)))
+        (devops-bb-test--run-block)
+        (let ((args (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t)))
+                      (devops-bb-sandbox--attach-args))))
+          (should (equal args '("a" "wb")))
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (_) (error "Asked to replace a dead publisher"))))
+            (apply #'devops-bb-sandbox-attach args)))
+        (should-not (gethash :dead (devops-bb-sandbox-attachment)))
+        (should (string-match-p "sandbox: wb" (devops-bb-sandbox--mode-line)))
+        (devops-bb-test--run-block)
+        (devops-bb-test--detach buf)
+        (should (= 1 (length (devops-bb-test--events
+                              (devops-bb-test--stdin root "a") "execute"))))))))
+
+(ert-deftest devops-bb-sandbox-quit-test ()
+  "Quitting Emacs closes each publisher's stdin and waits for it a while."
+  (devops-bb-test--with-sandbox root
+    (devops-bb-test--sink root "a")
+    (let ((devops-bb-sandbox-publish-command
+           (devops-bb-test--fake-publish "sleep 0.5; touch \"$2/flushed\""))
+          (buf (devops-bb-test--visit root "wb" devops-bb-test--elisp-block)))
+      (with-current-buffer buf (devops-bb-sandbox-attach "a" "wb"))
+      (should (memq 'devops-bb-sandbox--on-kill-emacs kill-emacs-hook))
+      (let ((start (float-time)))
+        (devops-bb-sandbox--on-kill-emacs)
+        (should (< (- (float-time) start) devops-bb-sandbox-quit-timeout)))
+      (should (file-exists-p (expand-file-name "feeds/a/flushed" root)))
+      (should (zerop (hash-table-count devops-bb-sandbox--registry))))))
+
+(ert-deftest devops-bb-sandbox-publish-test ()
+  "End to end, the real publisher: a child Emacs attaches, runs a block
+and exits at once.  The publisher, under SIGHUP, outlives it and pushes
+the run and `attached' false."
+  (devops-bb-test--with-sandbox root
+    (let* ((feed (expand-file-name "feed" root))
+           (file (expand-file-name "wb/wb.org" root))
+           (form
+            `(progn
+               (setq load-path ',load-path
+                     native-comp-enable-subr-trampolines nil)
+               (require 'devops-bb)
+               (devops-mode 1)
+               (devops-bb-log-mode 1)
+               (setq devops-bb-sandbox-sinks '(("local" :to ,feed))
+                     devops-bb-sandbox-publish-command
+                     '(,(expand-file-name "bin/devops-bb" devops-bb-test--repo) "publish")
+                     ob-confirm-posframe-mode t
+                     org-confirm-babel-evaluate nil)
+               (with-current-buffer (find-file-noselect ,file)
+                 (devops-bb-sandbox-attach "local" "wb")
+                 (goto-char (point-min))
+                 (re-search-forward "begin_src")
+                 (org-babel-execute-src-block))
+               ;; No waiting: only SIGHUP being ignored lets it flush.
+               (remove-hook 'kill-emacs-hook 'devops-bb-sandbox--on-kill-emacs)
+               (kill-emacs 0))))
+      (make-directory (file-name-directory file) t)
+      (write-region devops-bb-test--elisp-block nil file nil 'silent)
+      (should (zerop (call-process (expand-file-name invocation-name invocation-directory)
+                                   nil nil nil
+                                   "--batch" "--eval" (prin1-to-string form))))
+      (let ((status-file (expand-file-name "status.json" feed)))
+        (should (devops-bb-test--wait
+                 (lambda ()
+                   (and (file-exists-p status-file)
+                        (eq :false (alist-get 'attached
+                                              (car (devops-bb-test--json-lines
+                                                    status-file))))))
+                 30))
+        (let* ((status (car (devops-bb-test--json-lines status-file)))
+               (events (devops-bb-test--json-lines (expand-file-name "events.jsonl" feed)))
+               (run (car (devops-bb-test--events events "execute"))))
+          (should (equal (alist-get 'feed status) "wb"))
+          (should (equal (alist-get 'workbook status) file))
+          (should (equal (mapcar (lambda (e) (alist-get 'event e)) events)
+                         '("modify" "execute")))
+          (should (equal (mapcar (lambda (e) (alist-get 'seq e)) events) '(1 2)))
+          (should (equal (alist-get 'output
+                                    (car (devops-bb-test--json-lines
+                                          (expand-file-name
+                                           (format "outputs/%s.json" (alist-get 'id run))
+                                           feed))))
+                         "3")))))))
+
 (provide 'devops-bb-test)
 
 ;;; devops-bb-test.el ends here
