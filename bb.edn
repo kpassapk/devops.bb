@@ -7,7 +7,8 @@
  {dashboard
   {:doc "Follow the devops.el execution log in a TUI"
    :exec-fn devops.bb.dashboard/run
-   :org.babashka/cli {:spec {:log {:desc "Execution log; default: devops-execution-log from Emacs"}}}}
+   :org.babashka/cli {:spec {:log  {:desc "Execution log; default: devops-bb-execution-log from Emacs"}
+                             :feed {:desc "A sandbox's feed dir; default: DEVOPS_BB_FEED. Emacs is never asked"}}}}
 
   status     {:doc "Is Emacs reachable, devops-mode on, and where does it log"
               :exec-fn devops.bb.cli/status}
@@ -17,9 +18,9 @@
               :exec-fn devops.bb.cli/run-output}
   sessions   {:doc "Live async sessions"
               :exec-fn devops.bb.cli/sessions}
-  follow     {:doc "[--dir D] [--json]: a line per new log event under D"
+  follow     {:doc "[--dir D] [--json] [--after SEQ]: a line per new log event under D, or feed event"
               :exec-fn devops.bb.cli/follow}
-  modified   {:doc "FILE: does Emacs hold unsaved edits to it"
+  modified   {:doc "FILE: does Emacs hold unsaved edits to it (feed mode: FILE optional)"
               :exec-fn devops.bb.cli/modified}
   revert     {:doc "FILE: reload its buffer from disk"
               :exec-fn devops.bb.cli/revert}
@@ -27,16 +28,37 @@
               :exec-fn devops.bb.cli/tools}
   drift      {:doc "FILE [--heading H | --custom-id ID]: compare tangles with targets"
               :exec-fn devops.bb.cli/drift}
+  publish    {:doc "--to DIR [--map HOST=SANDBOX] [--max-lines N] [--max-bytes N] [--name N]: stdin to a sandbox's feed"
+              :exec-fn devops.bb.cli/publish}
+
+  test-emacs
+  {:doc "Run the Emacs side's ERT tests; DEVOPS_EL and CLJBANG are its checkouts, default ../devops.el and ../cljbang.el"
+   :requires ([babashka.fs :as fs])
+   :task (let [root (fs/parent (fs/absolutize *file*))
+               dir (fn [env sibling]
+                     (str (or (System/getenv env) (fs/normalize (fs/path root ".." sibling)))))]
+           ;; Watchdog: batch ERT can hang on a prompt.  macOS has no `timeout'.
+           (shell "perl" "-e" "alarm shift; exec @ARGV" "300"
+                  "emacs" "--batch"
+                  "-L" (dir "DEVOPS_EL" "devops.el")
+                  "-L" (dir "CLJBANG" "cljbang.el")
+                  "-L" (str (fs/path root "emacs"))
+                  "-L" (str (fs/path root "emacs" "test"))
+                  "--eval" "(setq native-comp-enable-subr-trampolines nil)"
+                  "--eval" "(require 'devops-bb-test)"
+                  "--eval" "(ert-run-tests-batch-and-exit \"^devops-bb-\")"))}
 
   test
   {:doc "Run tests"
    :extra-paths ["test"]
    :requires ([clojure.test :as t]
               [devops.bb.cli-test]
+              [devops.bb.feed-test]
               [devops.bb.log-test]
               [devops.bb.model-test]
               [devops.bb.view-test])
    :task (let [{:keys [fail error]} (t/run-tests 'devops.bb.cli-test
+                                                 'devops.bb.feed-test
                                                  'devops.bb.log-test
                                                  'devops.bb.model-test
                                                  'devops.bb.view-test)]

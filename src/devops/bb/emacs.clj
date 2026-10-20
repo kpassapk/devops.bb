@@ -2,7 +2,7 @@
   "The operator's Emacs, the one `emacsclient' reaches.
 
   The log says what ran; Emacs knows what it printed.  Output comes from
-  devops.el's `devops-scripting-block-output', and the block itself from
+  devops-bb-scripting.el's `devops-bb-scripting-block-output', and the block itself from
   cljbang-org's `cljbang-org-src-blocks'."
   (:require
    [babashka.process :as p]
@@ -32,24 +32,23 @@
 (defn- elisp-str [s] (pr-str (str s)))
 
 (defn log-path
-  "`devops-execution-log', expanded, or nil when it is off or Emacs is
+  "`devops-bb-execution-log', expanded, or nil when it is off or Emacs is
   out of reach."
   []
   (try
-    (eval-json "(and (boundp 'devops-execution-log) devops-execution-log
-                     (expand-file-name devops-execution-log))")
+    (eval-json "(and (boundp 'devops-bb-execution-log) devops-bb-execution-log
+                     (expand-file-name devops-bb-execution-log))")
     (catch Exception _ nil)))
 
 (defn- block-form [file line session id]
   (format
    "(let* ((file %s) (line %d) (session %s) (id %s)
            (run (and session id
-                     (progn (require 'devops-scripting)
-                            (fboundp 'devops-scripting-run-output))
-                     (devops-scripting-run-output session id)))
+                     (progn (require 'devops-bb-scripting)
+                            (devops-bb-scripting-run-output session id))))
            (out (condition-case err
-                    (progn (require 'devops-scripting)
-                           (devops-scripting-block-output file line))
+                    (progn (require 'devops-bb-scripting)
+                           (devops-bb-scripting-block-output file line))
                   (error (list (cons :error (error-message-string err))))))
            (blk (condition-case nil
                     (progn (require 'cljbang-org)
@@ -78,8 +77,8 @@
 
 (defn block-detail
   "What Emacs knows about a block run, from its log line:
-  {:run    <devops-scripting-run-output answer for SESSION and ID, or nil>
-   :output <devops-scripting-block-output answer at LINE, or {:error ..}>
+  {:run    <devops-bb-scripting-run-output answer for SESSION and ID, or nil>
+   :output <devops-bb-scripting-block-output answer at LINE, or {:error ..}>
    :block  {:language :name :body :line-start :line-end :heading} or nil}.
   :run is that run exactly; :output is the block's latest, or #+RESULTS.
   Nothing runs: all are reads."
