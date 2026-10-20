@@ -8,6 +8,7 @@
 (require 'ob-shell)
 (require 'tramp)
 (require 'devops-bb)
+(require 'devops-drift)
 
 (devops-mode 1)
 (devops-bb-log-mode 1)
