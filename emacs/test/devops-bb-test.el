@@ -647,6 +647,91 @@ The blocks it runs for noweb are not logged."
               (should (equal (alist-get 'file (car entries)) file))))
         (delete-file file)))))
 
+;;; Subscribers
+
+(defmacro devops-bb-test--with-subscriber (entries-var buffer &rest body)
+  "Run BODY with a subscriber for BUFFER collecting entries in ENTRIES-VAR.
+BUFFER nil subscribes it for every buffer.  Oldest first."
+  (declare (indent 2))
+  `(let* ((,entries-var nil)
+          (b ,buffer)
+          (f (lambda (entry)
+               (setq ,entries-var (append ,entries-var (list entry))))))
+     (devops-bb-log-subscribe f b)
+     (unwind-protect
+         (progn ,@body)
+       (devops-bb-log-unsubscribe f b))))
+
+(defun devops-bb-test--run-block ()
+  "Run the first src block in the current buffer, without asking."
+  (goto-char (point-min))
+  (re-search-forward "begin_src")
+  (let ((org-confirm-babel-evaluate nil))
+    (org-babel-execute-src-block)))
+
+(ert-deftest devops-bb-log-subscriber-indirect-test ()
+  "A run from an indirect buffer reaches its base buffer's subscribers.
+Another buffer's do not get it."
+  (let ((devops-bb-execution-log nil))
+    (devops-bb-test--with-org "* Run\n\n#+begin_src emacs-lisp\n(+ 1 2)\n#+end_src\n"
+      (let ((indirect (make-indirect-buffer (current-buffer)
+                                            "devops-bb-indirect" t)))
+        (unwind-protect
+            (with-temp-buffer
+              (devops-bb-test--with-subscriber other (current-buffer)
+                (devops-bb-test--with-subscriber entries indirect
+                  (with-current-buffer indirect
+                    (should (equal (devops-bb-test--run-block) 3)))
+                  (should (= 1 (length entries)))
+                  (should (equal (gethash :event (car entries)) "execute"))
+                  (should (equal (gethash :buffer (car entries))
+                                 "devops-bb-indirect"))
+                  (should (equal (gethash :line (car entries)) 3))
+                  (should-not other))))
+          (kill-buffer indirect))))))
+
+(ert-deftest devops-bb-log-subscriber-error-test ()
+  "A subscriber that signals is reported, and the others, the log and the
+run go on."
+  (devops-bb-test--with-execution-log log
+    (devops-bb-test--with-org "#+begin_src emacs-lisp\n(+ 1 2)\n#+end_src\n"
+      (let ((boom (lambda (_) (error "Boom"))))
+        (devops-bb-log-subscribe boom)
+        (unwind-protect
+            (devops-bb-test--with-subscriber entries (current-buffer)
+              (let ((inhibit-message t))
+                (should (equal (devops-bb-test--run-block) 3)))
+              (should (= 1 (length entries)))
+              (should (= 1 (length (devops-bb-test--log-entries log))))
+              (with-current-buffer "*Messages*"
+                (goto-char (point-max))
+                (should (search-backward "failed on execute: Boom" nil t))))
+          (devops-bb-log-unsubscribe boom))))))
+
+(ert-deftest devops-bb-log-subscriber-log-off-test ()
+  "With `devops-bb-execution-log' nil, subscribers still get entries.
+They still get none from a run that is not the user's."
+  (let ((devops-bb-execution-log nil))
+    (cl-letf (((symbol-function 'devops-bb-log-append-entry)
+               (lambda (&rest _) (error "Logged with the log off"))))
+      (devops-bb-test--with-org "#+begin_src emacs-lisp\n(+ 1 2)\n#+end_src\n"
+        (devops-bb-test--with-subscriber entries nil
+          (devops-bb-test--run-block)
+          (devops-with-sync (devops-bb-test--run-block))
+          (should (= 1 (length entries)))
+          (should (equal (gethash :event (car entries)) "execute")))))))
+
+(ert-deftest devops-bb-log-subscribe-test ()
+  "Subscribing twice adds once; unsubscribing a buffer's last drops it."
+  (with-temp-buffer
+    (let ((f #'ignore)
+          (b (current-buffer)))
+      (devops-bb-log-subscribe f b)
+      (devops-bb-log-subscribe f b)
+      (should (equal (gethash b devops-bb-log--buffer-subscribers) (list f)))
+      (devops-bb-log-unsubscribe f b)
+      (should (eq (gethash b devops-bb-log--buffer-subscribers :none) :none)))))
+
 (provide 'devops-bb-test)
 
 ;;; devops-bb-test.el ends here
