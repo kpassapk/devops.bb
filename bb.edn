@@ -27,6 +27,8 @@
               :exec-fn devops.bb.cli/tools}
   drift      {:doc "FILE [--heading H | --custom-id ID]: compare tangles with targets"
               :exec-fn devops.bb.cli/drift}
+  publish    {:doc "--to DIR [--map HOST=SANDBOX] [--max-lines N] [--max-bytes N] [--name N]: stdin to a sandbox's feed"
+              :exec-fn devops.bb.cli/publish}
 
   test-emacs
   {:doc "Run the Emacs side's ERT tests; DEVOPS_EL and CLJBANG are its checkouts, default ../devops.el and ../cljbang.el"
@@ -50,10 +52,12 @@
    :extra-paths ["test"]
    :requires ([clojure.test :as t]
               [devops.bb.cli-test]
+              [devops.bb.feed-test]
               [devops.bb.log-test]
               [devops.bb.model-test]
               [devops.bb.view-test])
    :task (let [{:keys [fail error]} (t/run-tests 'devops.bb.cli-test
+                                                 'devops.bb.feed-test
                                                  'devops.bb.log-test
                                                  'devops.bb.model-test
                                                  'devops.bb.view-test)]
