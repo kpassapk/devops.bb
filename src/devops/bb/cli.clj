@@ -170,10 +170,11 @@
 ;;; Publishing a feed
 
 (defn publish
-  "Push the JSON lines on stdin to the feed at --to, for one sandbox"
+  "Push the JSON lines on stdin to the feed at --to, for one sandbox;
+  with --via CMD, CMD runs `sh' where the feed is"
   {:org.babashka/cli {:require [:to]
                       :coerce {:map [] :max-lines :long :max-bytes :long}
-                      :restrict [:to :map :max-lines :max-bytes :name]}}
+                      :restrict [:to :via :map :max-lines :max-bytes :name]}}
   [opts]
   (try
     (publish/run opts)

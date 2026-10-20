@@ -277,3 +277,121 @@
       (is (nil? (feed/status dir)))
       (feed/put (feed/local-dir dir) "status.json" "{\"feed\":\"wb\"}")
       (is (= {:feed "wb"} (feed/status dir))))))
+
+;;; --via CMD
+
+(defn- fake-via!
+  "A dir holding `via', a CMD for --via that counts its calls in
+  `calls', fails while `fails' holds a positive count, and then runs
+  the rest of its args, the `sh -c SCRIPT', here."
+  [fails]
+  (let [dir (temp-dir)
+        f   (str (fs/path dir "via"))]
+    (spit (str (fs/path dir "fails")) (str fails))
+    (spit f (str "#!/bin/sh\n"
+                 "d=" (feed/sh-quote dir) "\n"
+                 "echo call >> \"$d/calls\"\n"
+                 "n=$(cat \"$d/fails\")\n"
+                 "if [ \"$n\" -gt 0 ]; then echo $((n - 1)) > \"$d/fails\"; echo down >&2; exit 255; fi\n"
+                 "exec \"$@\"\n"))
+    (fs/set-posix-file-permissions f "rwxr-xr-x")
+    dir))
+
+(defn- calls [via-dir]
+  (let [f (fs/file via-dir "calls")]
+    (if (fs/exists? f) (count (str/split-lines (slurp f))) 0)))
+
+(deftest via-sink-test
+  (let [via (fake-via! 0)
+        ;; A feed path that needs quoting.
+        to  (str (fs/path (temp-dir) "it's a feed"))
+        s   (feed/via (feed/sh-quote (str (fs/path via "via"))) to)]
+    (feed/put s feed/events-file "")
+    (feed/put s feed/status-file "{\"feed\":\"wb\"}")
+    (feed/append s "{\"seq\":1}")
+    (feed/put-append s (feed/output-file id1) "{\"output\":\"a\\nb\"}"
+                     "{\"seq\":2,\"input\":\"x  'y' \\\"$z\\\" \\\\n\"}")
+    (is (= 4 (calls via)) "one command each, a result too")
+    (is (= {:feed "wb"} (feed/status to)))
+    (is (= [1 2] (map :seq (:events (feed/events-after to {})))))
+    (is (= "x  'y' \"$z\" \\n" (:input (second (:events (feed/events-after to {}))))))
+    (is (= "{\"output\":\"a\\nb\"}" (feed/output to id1)))
+    (is (empty? (fs/glob to "**.tmp")))
+    (testing "a feed path is relative, never up"
+      (is (thrown? Exception (feed/put s "../x" "")))
+      (is (thrown? Exception (feed/put s "/etc/x" ""))))
+    (testing "--to is absolute"
+      (is (thrown? Exception (feed/via "env" "feed"))))
+    (testing "no script waits for EOF, which docker exec -i can lose"
+      ;; The pipe into the command stays open 10 s after its input.
+      (let [s (feed/via "sh -c '{ cat; sleep 10 3>&1 >/dev/null 2>&1 & } | exec \"$0\" \"$@\"'"
+                        to {:timeout-ms 5000})]
+        (feed/put s feed/events-file "")
+        (feed/put s feed/status-file "{\"feed\":\"no-eof\"}")
+        (feed/put-append s (feed/output-file id2) "{\"output\":\"é\"}" "{\"seq\":1}")
+        (feed/append s "{\"seq\":2}")
+        (is (= {:feed "no-eof"} (feed/status to)))
+        (is (= "{\"output\":\"é\"}" (feed/output to id2)))
+        (is (= [1 2] (map :seq (:events (feed/events-after to {})))))))
+    (testing "a command that hangs times out"
+      (is (thrown-with-msg? Exception #"no answer"
+                            (feed/put (feed/via "sh -c 'sleep 5' x" to {:timeout-ms 200}) "a.json" ""))))))
+
+(deftest via-refuses-symlinks-test
+  (let [elsewhere (temp-dir)
+        root      (temp-dir)
+        sink      #(feed/via "env" (str (fs/path root %)))]
+    (testing "TO a symlink"
+      (fs/create-sym-link (fs/path root "to") elsewhere)
+      (is (thrown-with-msg? Exception #"symlink" (feed/append (sink "to") "{}")))
+      (is (thrown-with-msg? Exception #"symlink" (feed/put (sink "to") "status.json" "{}"))))
+    (testing "TO/outputs a symlink"
+      (fs/create-dirs (fs/path root "a"))
+      (fs/create-sym-link (fs/path root "a" "outputs") elsewhere)
+      (is (thrown-with-msg? Exception #"symlink"
+                            (feed/put-append (sink "a") (feed/output-file id1) "{}" "{\"seq\":1}")))
+      (is (not (fs/exists? (fs/path root "a" "events.jsonl"))) "no event without its output"))
+    (testing "the target a symlink"
+      (fs/create-dirs (fs/path root "b"))
+      (fs/create-sym-link (fs/path root "b" "events.jsonl") (fs/path elsewhere "e"))
+      (fs/create-sym-link (fs/path root "b" "status.json") (fs/path elsewhere "s"))
+      (is (thrown-with-msg? Exception #"symlink" (feed/append (sink "b") "{}")))
+      (is (thrown-with-msg? Exception #"symlink" (feed/put (sink "b") "status.json" "{}"))))
+    (is (empty? (fs/list-dir elsewhere)) "nothing written where a link points")))
+
+(deftest via-retry-test
+  (let [via (fake-via! 2)
+        to  (str (fs/path (temp-dir) "feed"))
+        {:keys [done]} (binding [*err* (java.io.StringWriter.)]
+                         (publish/start! {:via (str (fs/path via "via")) :to to :heartbeat-ms 60000}
+                                         (lines-in {:event "result" :id id1 :file "/w/a.org"
+                                                    :output {:id id1 :output "hi"}})))]
+    (is (deref done 10000 false))
+    (testing "two failed calls, then each push once"
+      (is (= (+ 2 4) (calls via))))
+    (is (= [1] (map :seq (:events (feed/events-after to {})))))
+    (is (= "hi" (:output (json/parse-string (feed/output to id1) true))))))
+
+(deftest publish-via-test
+  (let [fake (fake-emacsclient!)
+        via  (fake-via! 0)
+        to   (str (fs/path (temp-dir) "feed"))
+        in   (str/join (map #(str (json/generate-string %) "\n")
+                            [{:event "status" :file "/h/w/a.org" :devops-mode true}
+                             {:event "execute" :file "/h/w/a.org" :id id1 :status "running"}
+                             {:event "result" :file "/h/w/a.org" :id id1 :status "done"
+                              :output {:session "s" :status "done" :id id1 :input "ls" :output "x\n"}}
+                             {:event "result" :file "/h/w/a.org" :id id2 :status "done"
+                              :output {:session "s" :status "done" :id id2 :input "ls" :output "y\n"}}]))
+        r    (p/shell {:in in :out :string :err :string :continue true :env (bb-env fake {})}
+                      "bb" "--config" bb-edn "publish" "--via" (str (fs/path via "via") " env")
+                      "--to" to "--map" "/h/w=/work" "--name" "wb")
+        evs  (:events (feed/events-after to {}))]
+    (is (zero? (:exit r)) (:err r))
+    (testing "one command per result: start, status, execute, two results, status"
+      (is (= 6 (calls via))))
+    (is (= [1 2 3] (map :seq evs)))
+    (is (every? #(= "/work/a.org" (:file %)) evs))
+    (is (= "y\n" (:output (json/parse-string (feed/output to id2) true))))
+    (is (false? (:attached (feed/status to))))
+    (is (not (fs/exists? (fs/path fake "called"))))))

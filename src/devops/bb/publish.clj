@@ -230,9 +230,12 @@
     (let [x (.take q)]
       (when-not (= ::eof x)
         (let [{n :seq :keys [id output event]} x]
-          (when output
-            (retry! (str "outputs/" id ".json") #(feed/put sink (feed/output-file id) output)))
-          (retry! (str "event " n) #(feed/append sink event))
+          (if (and output (satisfies? feed/Batched sink))
+            ;; One command for both; a retry puts the output again.
+            (retry! (str "event " n) #(feed/put-append sink (feed/output-file id) output event))
+            (do (when output
+                  (retry! (str "outputs/" id ".json") #(feed/put sink (feed/output-file id) output)))
+                (retry! (str "event " n) #(feed/append sink event))))
           (swap! state update :pushed inc)
           (recur)))))
   (retry! "status.json" #(put-status! opts state)))
@@ -240,14 +243,23 @@
 (defn- daemon [f]
   (doto (Thread. ^Runnable (bound-fn* f)) (.setDaemon true) .start))
 
+(defn- sink
+  "The sink OPTS name: :sink, else :to through the command :via, else
+  :to, a local dir."
+  [{:keys [sink via to]}]
+  (cond sink sink
+        via  (feed/via via to)
+        :else (feed/local-dir to)))
+
 (defn start!
-  "Start publishing IN, a reader of JSON lines, to (:sink OPTS), else a
-  local dir at (:to OPTS).  Returns {:state atom :queue q :done promise};
-  :done is delivered once every item is pushed after EOF."
+  "Start publishing IN, a reader of JSON lines, to (:sink OPTS), else
+  (:to OPTS), through the command (:via OPTS) or a local dir.  Returns
+  {:state atom :queue q :done promise}; :done is delivered once every
+  item is pushed after EOF."
   [opts in]
   (let [opts  (merge defaults opts)
         opts  (assoc opts
-                     :sink (or (:sink opts) (feed/local-dir (:to opts)))
+                     :sink (sink opts)
                      :maps (parse-maps (:map opts))
                      :name (or (:name opts) (fs/file-name (fs/absolutize (:to opts))))
                      :status-lock (Object.))
@@ -271,7 +283,8 @@
     {:state state :queue q :done done :opts opts}))
 
 (defn run
-  "Publish stdin to the feed at --to until stdin closes."
+  "Publish stdin to the feed at --to, through --via if given, until
+  stdin closes."
   [opts]
   @(:done (start! opts *in*))
   (System/exit 0))
