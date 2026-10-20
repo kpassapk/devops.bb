@@ -7,7 +7,8 @@
  {dashboard
   {:doc "Follow the devops.el execution log in a TUI"
    :exec-fn devops.bb.dashboard/run
-   :org.babashka/cli {:spec {:log {:desc "Execution log; default: devops-bb-execution-log from Emacs"}}}}
+   :org.babashka/cli {:spec {:log  {:desc "Execution log; default: devops-bb-execution-log from Emacs"}
+                             :feed {:desc "A sandbox's feed dir; default: DEVOPS_BB_FEED. Emacs is never asked"}}}}
 
   status     {:doc "Is Emacs reachable, devops-mode on, and where does it log"
               :exec-fn devops.bb.cli/status}
@@ -17,9 +18,9 @@
               :exec-fn devops.bb.cli/run-output}
   sessions   {:doc "Live async sessions"
               :exec-fn devops.bb.cli/sessions}
-  follow     {:doc "[--dir D] [--json]: a line per new log event under D"
+  follow     {:doc "[--dir D] [--json] [--after SEQ]: a line per new log event under D, or feed event"
               :exec-fn devops.bb.cli/follow}
-  modified   {:doc "FILE: does Emacs hold unsaved edits to it"
+  modified   {:doc "FILE: does Emacs hold unsaved edits to it (feed mode: FILE optional)"
               :exec-fn devops.bb.cli/modified}
   revert     {:doc "FILE: reload its buffer from disk"
               :exec-fn devops.bb.cli/revert}

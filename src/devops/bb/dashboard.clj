@@ -5,12 +5,16 @@
   The Elm loop of charm.clj: `update' turns a message into the next
   state and maybe a command, `view' (devops.bb.view) draws the state.
   Commands are the only place anything is read: the log, every
-  `poll-ms', and Emacs, when an event is opened."
+  `poll-ms', and Emacs, when an event is opened.
+
+  In feed mode (DEVOPS_BB_FEED or --feed) the log is the feed's
+  events.jsonl, and Emacs is never asked: opening a block run says so."
   (:require
    [babashka.fs :as fs]
    [charm.message :as msg]
    [charm.program :as charm]
    [devops.bb.emacs :as emacs]
+   [devops.bb.feed :as feed]
    [devops.bb.log :as log]
    [devops.bb.model :as model]
    [devops.bb.view :as view])
@@ -29,13 +33,17 @@
 (defn- block-event? [e]
   (and (#{:execute :result} (:event e)) (:file e) (:line e)))
 
-(defn- detail-cmd [{:keys [seq] :as e}]
-  (charm/cmd (fn []
-               (try {:type :detail :seq seq :data (emacs/block-detail e)}
-                    (catch Exception ex {:type :detail :seq seq :error (ex-message ex)})))))
+(def ^:private no-emacs "needs Emacs, which this sandbox cannot reach")
 
-(defn- visit-cmd [{:keys [file line]}]
-  (when file
+(defn- detail-cmd [state {:keys [seq] :as e}]
+  (charm/cmd (fn []
+               (if (:feed? state)
+                 {:type :detail :seq seq :error no-emacs}
+                 (try {:type :detail :seq seq :data (emacs/block-detail e)}
+                      (catch Exception ex {:type :detail :seq seq :error (ex-message ex)}))))))
+
+(defn- visit-cmd [state {:keys [file line]}]
+  (when (and file (not (:feed? state)))
     (charm/cmd (fn [] (emacs/visit! file line) {:type :visited}))))
 
 ;;; State
@@ -75,7 +83,7 @@
   (when-let [e (selected state)]
     (if (block-event? e)
       [(assoc state :page :detail :detail {:event e :status :loading :scroll 0})
-       (detail-cmd e)]
+       (detail-cmd state e)]
       [(assoc state :page :detail :detail {:event e :status :ok :scroll 0}) nil])))
 
 (defn- scroll [state f]
@@ -114,7 +122,7 @@
         (or (msg/key-match? m " ") (msg/key-match? m :page-down)) [(scroll state #(+ % page-rows)) nil]
         (msg/key-match? m :page-up)                              [(scroll state #(- % page-rows)) nil]
         (msg/key-match? m "g")                                   [(scroll state (constantly 0)) nil]
-        (msg/key-match? m "e")                                   [state (visit-cmd (get-in state [:detail :event]))]
+        (msg/key-match? m "e")                                   [state (visit-cmd state (get-in state [:detail :event]))]
         (msg/key-match? m "r")                                   (or (open (assoc state :page :feed)) [state nil])
         :else [state nil])
 
@@ -128,7 +136,7 @@
         (msg/key-match? m "G")                                    [(move state (constantly Long/MAX_VALUE)) nil]
         (or (msg/key-match? m :enter) (msg/key-match? m :right) (msg/key-match? m "l"))
         (or (open state) [state nil])
-        (msg/key-match? m "e")                                    [state (visit-cmd (selected state))]
+        (msg/key-match? m "e")                                    [state (visit-cmd state (selected state))]
         :else [state nil]))))
 
 (defn view-fn [state]
@@ -137,11 +145,13 @@
     (view/feed state)))
 
 (defn init-state
-  "The first state, with everything already in the log at PATH."
-  [path emacs?]
+  "The first state, with everything already in the log at PATH.
+  FEED? means PATH is a sandbox's feed, and Emacs is out of reach."
+  [path emacs? & [feed?]]
   (let [{:keys [events offset missing]} (log/read-from path 0)]
     {:log-path path
      :emacs?   emacs?
+     :feed?    (boolean feed?)
      :offset   offset
      :model    (model/add-events model/empty-model events)
      :message  (when missing (str "No log yet at " path))
@@ -152,14 +162,17 @@
 
 (defn run
   "Follow the devops.el execution log in a TUI"
-  [{:keys [log]}]
-  (let [from-emacs (emacs/log-path)
-        path       (some-> (or log from-emacs) fs/expand-home str)]
+  [{:keys [log] :as opts}]
+  (let [feed-dir   (feed/configured opts)
+        from-emacs (when-not feed-dir (emacs/log-path))
+        path       (if feed-dir
+                     (str (fs/path feed-dir feed/events-file))
+                     (some-> (or log from-emacs) fs/expand-home str))]
     (when-not path
       (binding [*out* *err*]
         (println "No log: devops-bb-execution-log is nil or Emacs is out of reach; pass --log PATH."))
       (System/exit 1))
-    (let [state (init-state path (some? from-emacs))]
+    (let [state (init-state path (some? from-emacs) feed-dir)]
       (charm/run {:init       (fn [] [state (poll-cmd path (:offset state))])
                   :update     update-fn
                   :view       view-fn
