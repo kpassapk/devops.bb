@@ -27,6 +27,8 @@
 ;; - devops-bb-scripting.el  functions for scripts over emacsclient
 ;; - devops/bb/log.clj       `devops-bb-log-mode', which writes
 ;;                           `devops-bb-execution-log'; cljbang
+;; - devops/bb/sandbox.clj   `devops-bb-sandbox-attach', which feeds a
+;;                           workbook's runs to a sandbox; cljbang
 ;;
 ;; Setup:
 ;;
@@ -34,6 +36,8 @@
 ;;   (require 'devops-bb)
 ;;   (setq devops-bb-execution-log "~/.cache/devops/executions.jsonl")
 ;;   (devops-bb-log-mode 1)
+;;   ;; A sandbox's feed, for M-x devops-bb-sandbox-attach:
+;;   (setq devops-bb-sandbox-sinks '(("box" :to "~/feeds/box")))
 
 ;;; Code:
 
@@ -43,6 +47,7 @@
 (add-to-list 'cljbang-load-path
              (file-name-directory (or load-file-name buffer-file-name)))
 (cljbang-require 'devops.bb.log)
+(cljbang-require 'devops.bb.sandbox)
 
 (provide 'devops-bb)
 
