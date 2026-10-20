@@ -116,6 +116,21 @@ Either way the workbook dir is on the host's disk, so the host can
 check and hash it (below). TRAMP is not supported: attach refuses a
 remote =buffer-file-name=.
 
+*devops-bb in the sandbox* needs babashka 1.13.226 or later (on
+1.12.200 the =:exec-fn= tasks print nothing and exit 0) and =git=:
+bb 1.13 resolves =bb.edn='s git dep (charm.clj) with =git=, no Java.
+Resolve deps when the image is built, so the running sandbox needs no
+egress for them. Claude's user is not root and does not own the feed;
+the publisher writes it as root (=docker exec -i -u root=) or as the
+node's =feed= user. A container run, from PR 9's check:
+
+#+begin_example
+docker run -d --name BOX --user 1000:1000 -e HOME=/tmp \
+  -v "$WB_DIR":/work:rw -v "$FEED":/feed:ro IMAGE sleep infinity
+devops-bb publish --via "docker exec -i -u root BOX" --to /feed \
+  --map "$WB_DIR=/work" --name wb    # or --to "$FEED" for the ro mount
+#+end_example
+
 The workflow is the library's main one, so the design bends devops.bb
 to it instead of wrapping it with scripts in each project
 (replaces steps 4-5 of the infra-devcontainer workbook).
@@ -216,45 +231,94 @@ through generic extension points. =devops-bb-sandbox-attach= refuses
 unless =ob-confirm-posframe-mode= is on: a bare =y/n= shows neither
 headers nor diffs.
 
-*Every run is confirmed, unless unchanged.* In an attached buffer
-=org-confirm-babel-evaluate= decides by a *fingerprint* of the run:
-lang, body, processed params (inherited ones included), the resolved
-target and session, and a hash (path, size, sha256) of every file in
-the workbook dir except the =.org=. A fingerprint the operator
-confirmed and ran (=org-babel-after-execute-hook=) skips the prompt;
-anything else prompts. Re-running an unchanged diagnostic stays one
-keystroke; any edit Claude makes, to the block or to a file beside
-it, prompts once with the diff.
+*Every run is confirmed, unless unchanged.* In an attached run the
+confirm decides by a *fingerprint* of the run, sha256 of: lang; the
+body, references expanded and calls as written; the processed params,
+inherited ones included, sorted, with =:dir= expanded (without file
+handlers) and the pool slot =<N>= stripped from =:session=; the
+resolved target (=devops--block-target=, TAG and TARGET, a dynamic
+target's value included), the session and =devops-target-env=; and
+(path, size, sha256) of every file in the workbook dir except the
+=.org=. A fingerprint the operator confirmed and that then ran
+(recorded in =org-babel-after-execute-hook=, so a run that failed after
+the yes prompts again) skips the prompt; anything else prompts.
+Re-running an unchanged diagnostic stays one keystroke; any edit Claude
+makes, to the block or to a file beside it, prompts once with the
+diff. Hashing is not cached: 43 files, 1.7 MB take ~17 ms (PR 8's
+spike).
 
 devops.el resolves =#+TARGET= in its =org-babel-execute-src-block=
 advice, before org's confirm, so by then =params= holds the injected
-=:dir= and =:session=: the fingerprint and the prompt read them there.
+=:dir= (possibly relative, as written) and =:session=: the fingerprint
+and the prompt read them there. The target comes from devops.el's
+private =devops--block-target=; it should become public (only
+=devops-block-session= is today).
+
+*The confirm is advice, not a wrapper on =org-confirm-babel-evaluate=.*
+Org calls a function there as =(LANG BODY)= with the body already
+expanded, which runs noweb calls before any prompt, and without INFO.
+So =:around= advice on =org-babel-check-confirm-evaluate= decides for
+attached runs: it calls the original with the variable bound to t (so
+=:eval no= and =:eval query= keep their meaning) and returns t only for
+a confirmed fingerprint. Unattached buffers never reach it; the user's
+own setting applies there unchanged.
 
 *What the prompt shows*, via ob-confirm-posframe:
 
-- =ob-confirm-posframe-header-functions= (exists): target and session.
-- =ob-confirm-posframe-notice-functions= (new): highlighted lines above
-  the body. devops.bb adds "changed since you ran it" with the block's
-  diff, "files changed since you last ran a block" with =+n/-m= per
-  file, "noweb call: =name()=", "resolves target =prod= for
-  =check-disk=", and "target changed: =A= → =B=".
-- the body with noweb references expanded (new, an option): the text
-  that runs. A call =<<name()>>= is shown as written, never expanded:
-  =org-babel-expand-noweb-references= runs it (PR 6's spike).
+- =ob-confirm-posframe-header-functions=: target and session, plus
+  =target TAG TARGET · ENV=. It follows =:dir= on the line and is cut
+  at the posframe's width when =:dir= is long, so a scheme's credential
+  is also a notice.
+- =ob-confirm-posframe-notice-functions=: highlighted lines above the
+  body, each a string or =(ob-confirm-posframe-notice LINE DETAIL)=.
+  devops.bb adds "not run since attach", "changed since you ran it:
+  +n/-m", "files changed since you last ran a block: =a.py +2/-0 (new)=,
+  …", "noweb call: =name()=", "resolves target =TAG= for =OUTER=",
+  "target changed: =A= → =B=" and "credential: target =/aws:dev: ·
+  AWS_PROFILE=dev=". Diffs are =diff -u=, kept behind =d=.
+- =ob-confirm-posframe-expand-noweb=: the body with noweb references
+  expanded, the text that runs. A call =<<name()>>= is shown as
+  written, never expanded: =org-babel-expand-noweb-references= runs it
+  (PR 6's spike).
+- =d=: every notice with its detail, a multi-file =diff-mode= buffer,
+  in a window; =q= returns to the prompt.
+- The advice is at depth -90, outside devops.el's, so a dynamic
+  target's block prompts inside the chain of the block the operator
+  ran: =check-disk › pick-host=. Org resolves =:var= references before
+  it confirms, so prompts come innermost first.
 
 *Elisp in a header is refused, not shown.* Org evaluates elisp header
 values (=:var x=(…)=, =:dir (…)=, inherited ones from =#+PROPERTY= or a
 property drawer) when it processes params, which is before the confirm
-(PR 6's spike), so no prompt can guard it. In an attached buffer, an
-advice outside org's processing reads the block's raw, unevaluated
-params, inherited ones included, and refuses the run when a value is
-elisp: "elisp in header =:var x=: a sandboxed workbook may not
-evaluate header values".
-- =d= (new): the full notice, a multi-file =diff-mode= buffer, in a
-  window, then back to the prompt.
-- the advice goes on at depth -90 (new), outside devops.el's, so a
-  dynamic target's block prompts inside the chain of the block the
-  operator ran: =check-disk › pick-host=.
+(PR 6's spike), so no prompt can guard it. Two layers, for a run from
+an attached buffer and for files that run visits for a reference:
+
+1. *Raw check.* Advice on =org-babel-get-src-block-info= and
+   =org-babel-lob-get-info= (when they evaluate) checks each source org
+   reads separately, since org evaluates each as it parses it, before
+   merging: the defaults (inline, per language, lob), =header-args= and
+   =header-args:LANG= properties (=#+PROPERTY= and drawers, inherited),
+   =#+HEADER= lines, the block line, and a call's inside and end headers
+   and arguments. Advice on =org-babel-ref-resolve= checks reference
+   arguments and =[headers]=; noweb calls' arguments are checked when
+   the review expands the body, before the prompt. A value is elisp
+   when it starts with =(=, ='=, =`= or =[=; a =:var='s right-hand side is
+   checked recursively; =*this*= is allowed. The refusal is a
+   =user-error=, "elisp in header =:var x=: a sandboxed workbook may not
+   evaluate header values", before any prompt and before devops.el
+   resolves a target.
+2. *Backstop.* A guard on =org-babel-read= refuses any lisp evaluation in
+   an attached run until that run is confirmed. Every
+   =org-babel-execute-src-block= and =org-babel-ref-resolve= starts
+   unconfirmed; only a yes sets it.
+
+The operator's own non-string =org-babel-default-header-args= are
+trusted. =:dir 'attach= is refused: it looks like elisp.
+
+*Org creates =:output-dir= while only reading a block's info*, even
+without evaluating, so before the confirm. Advice on
+=org-babel-generate-file-param= stops it for a dir outside the
+workbook dir.
 
 *Dynamic targets* stay: targets may be checkouts and ephemeral
 instances. devops.el binds a public =devops-resolving-target=, =(TAG
@@ -284,25 +348,41 @@ the diffs). Detach clears it.
 
 - =:around= advice on =hack-local-variables= binds
   =enable-local-variables=, =enable-local-eval= and
-  =enable-dir-local-variables= to nil for an attached buffer.
-- The global =org-confirm-babel-evaluate= is a wrapper: attached
-  buffers get the fingerprint function, others the user's own setting.
+  =enable-dir-local-variables= to nil for an attached buffer, and for
+  files its runs visit. Attach re-runs =normal-mode= if the buffer had
+  already read file-local or dir-local variables. The =mode:= cookie is
+  still honoured by =set-auto-mode=.
 - vc is off for attached buffers (=vc-handled-backends= nil around
-  =vc-refresh-state=), so Emacs never runs =git status= in the dir.
+  =vc-refresh-state=, vc props cleared at attach), so Emacs never runs
+  =git status= in the dir.
 - After a revert that changes keyword lines, =org-mode-restart=, so
-  =#+PROPERTY= and =#+STARTUP= caches match the disk. Safety does not
+  =#+PROPERTY= and =#+STARTUP= caches match the disk. Affiliated
+  keywords (=#+NAME=, =#+RESULTS=, =#+CALL=) don't count. Safety does not
   depend on it: the fingerprint uses the processed params.
+- Revert with =preserve-modes= (auto-revert) reads no local variables
+  (PR 8's spike); the advice covers it anyway, and a test does.
 
-*The workbook dir is checked* on attach, on every revert and before
-every confirm. Any regular file and subdirectory is allowed: Claude
-writes code. A dotfile or dot-dir at any depth (=.git=,
-=.dir-locals.el=, =.envrc=, …) or a symlink (=lstat=, never followed)
-*suspends* the buffer: every run is refused with "sandbox dir has
-=.git/=: remove it to continue", and the mode line says =sandbox:
-SUSPENDED=. =:file= and =:output-dir= must resolve inside the dir: no
-absolute path, no =..=. The README says to keep LSP auto-start off in
-sandbox dirs: clojure-lsp evaluates =bb.edn= and =deps.edn= on visit,
-which no check can catch.
+*Emacs's own files stay out of the dir.* The lock file =.#wb.org= is a
+dotfile symlink, so the operator's first edit would suspend the
+buffer, and auto-saves (=#wb.org#=) and backups (=wb.org~=) would change
+the fingerprint. Attached buffers set =create-lockfiles= nil (dropping
+any existing lock) and keep backups and auto-saves under
+=~/.emacs.d/devops-bb-sandbox/=.
+
+*The workbook dir is checked* on attach (which it refuses), after every
+revert, on every run and on every confirm. Any regular file and
+subdirectory is allowed: Claude writes code. A dotfile or dot-dir at
+any depth (=.git=, =.dir-locals.el=, =.envrc=, …), a symlink (read with
+=file-attributes=, never followed, dangling ones included) or a special
+file *suspends* the buffer: every run is refused with "sandbox dir has
+=.git/=: remove it to continue", the mode line says =sandbox:
+SUSPENDED=, and the buffer resumes once the check passes. The check is
+time-of-check: Claude could add a symlink between the check and the
+run. =:file= and =:output-dir= may not be absolute, contain =..= or be
+elisp, and, resolved against the block's =:dir=, must land inside the
+dir; so a block on a remote target cannot write =:file=. The README
+says to keep LSP auto-start off in sandbox dirs: clojure-lsp evaluates
+=bb.edn= and =deps.edn= on visit, which no check can catch.
 
 ** Events: one emit, many subscribers
 
@@ -317,24 +397,49 @@ file is one subscriber.
 - *Sandbox subscriber*, one per attached buffer, cljbang in
   =sandbox.clj=: gets only the entries emitted from its buffer. For a
   =result= entry it takes the run's output from the session and sends
-  the entry with an =output= field. For a sync =execute= (no =id=) it
-  makes up a UUID and sends =#+RESULTS= as the output (Caveats).
+  the entry with an =output= field. For a sync =execute= (status not
+  =running=; not "no =id=", since =block-output= can return an old async
+  run of the same body) it makes up a UUID and sends =#+RESULTS= as the
+  output (Caveats).
+
+=(devops-bb-log-subscribe F &optional BUFFER)= and
+=devops-bb-log-unsubscribe= register F, called with the entry (a
+cljbang map), globally or for BUFFER's base buffer. The tables are
+globals, so a revert keeps them. =emit= does nothing unless
+=devops-mode= is on and someone listens. Only the log subscriber needs
+=devops-bb-execution-log=; =devops-user-run-p= applies to run events
+(=execute=, =result=), as before: =tangle= and =drift= are user-only
+already, and edit events are not runs.
 
 Dispatch is by *base buffer*, not by =file=, so there is no path filter
 to get wrong: =emit= looks up =(or (buffer-base-buffer)
-(current-buffer))= in the registry (Review), so a run from an indirect
-buffer (=org-tree-to-indirect-buffer=) reaches its workbook's sandbox.
-Killing an indirect buffer does nothing; killing the base detaches. A
-subscriber that fails is reported in =*Messages*= and does not stop
-the others, the log, or the block run.
+(current-buffer))=, so a run from an indirect buffer
+(=org-tree-to-indirect-buffer=) reaches its workbook's sandbox. Its
+async result is inserted with the indirect buffer current (PR 7's
+spike). Entries from an indirect buffer carry its =buffer= name and a
+=line= relative to its narrowing; the log keeps them so, and the
+sandbox subscriber converts =line= to the line in the file. Killing an
+indirect buffer whose base has unsaved edits emits a =kill= entry; the
+subscriber drops it, or feed-mode =modified= would say false while the
+workbook has unsaved edits. Killing the base detaches, from
+=kill-buffer-hook= at depth 90, after the base's own =kill= entry. A
+subscriber that fails is reported in =*Messages*= as =devops-bb-log: F
+failed on EVENT: MSG= and does not stop the others, the log, or the
+block run; so is a failed log write.
 
 *One run, by ID.* The =result= entry is emitted inside ob-comint's
 process filter. =devops-bb-scripting-run-output= scans the whole
 session for every run; the subscriber instead uses a new
 =devops-bb-scripting--run=, which searches the start and end markers
 of that ID only, and =run-output= uses it too. The subscriber takes at
-most =--max-bytes= × 2 of output, head and tail, so a huge output never
-leaves Emacs; the publisher's cap stays the exact, tested rule.
+most =--max-bytes= × 2 of output, head and tail
+(=devops-bb-scripting--head-tail=), so a huge output never leaves
+Emacs, and marks a cut answer =truncated= with the full =lines= and
+=bytes=, which the publisher keeps; the publisher's cap stays the
+exact, tested rule. =--run= searches forward from the top, so the
+latest run still costs a read of the whole buffer (~5 ms per 0.5 MB);
+the old scan grew with the square of the runs (2.5 s at 1000 runs).
+=devops-bb-scripting-sessions= still uses the old scan.
 
 *Emacs never waits.* The split, JSON lines on stdin the only interface:
 
@@ -358,13 +463,23 @@ Emacs.
 *Attaching.* The operator attaches a workbook from its buffer with
 =devops-bb-sandbox-attach= (cljbang, =emacs/devops/bb/sandbox.clj=). It
 asks for a sink by name from =devops-bb-sandbox-sinks=, a defcustom
-of named sinks (=--ssh= or =--via=, =--to=, =--map=, caps), and a feed
-name, starts =devops-bb publish …= as a child process with stdin a
-pipe, and registers the buffer. =devops-bb-sandbox-detach=, killing the
-buffer, or quitting Emacs closes stdin: the publisher pushes what it
-has, marks the feed detached, and exits. Killing a buffer with unsaved
-edits sends its =kill= event before stdin closes. Attaching a buffer
-that is already attached asks to replace its sink.
+=((NAME . PLIST) …)= with =:to= (required), =:via= or =:ssh=, =:map= (an
+alist of host dir → sandbox dir), =:max-lines= and =:max-bytes=, and a
+feed name; starts =devops-bb-sandbox-publish-command= (default
+=devops-bb publish=) with those flags and =--name= as a child process
+with stdin a pipe; and registers the base buffer. One sink serves one
+live attachment. =devops-bb-sandbox-detach=, killing the buffer, or
+quitting Emacs closes stdin: the publisher pushes what it has, marks
+the feed detached, and exits. Killing a buffer with unsaved edits
+sends its =kill= event before stdin closes. Attaching a buffer that is
+already attached asks to replace its sink.
+
+*Quitting Emacs.* Emacs SIGHUPs its children on exit, so the
+publisher never flushed (PR 7's spike). It runs as =sh -c "trap ''
+HUP; exec \"$@\""=, and a =kill-emacs-hook= closes each publisher's
+stdin and waits up to =devops-bb-sandbox-quit-timeout= (2 s) for it.
+The publisher still flushes past that. A sink that hangs at EOF keeps
+the publisher waiting forever; nothing kills it yet.
 
 Attach refuses when =ob-confirm-posframe-mode= is off, when
 =buffer-file-name= is remote, when the dir check fails, or when a
@@ -383,18 +498,24 @@ code Claude writes: =work/<denote-id>/=, or any dir the operator picks.
 Not the file: a file bind mount is pinned to an inode, and the first
 save by rename leaves the sandbox on the old one. Not =work/=: the
 siblings' =#+RESULTS= hold past server output. Attached buffers get
-=backup-by-copying= anyway, for git and rsync. The feed is a separate
+=backup-by-copying= anyway, for git and rsync, reapplied from
+=after-change-major-mode-hook= so a revert keeps it; the mode line
+entry =sandbox: FEED= is an =(:eval …)= in =mode-line-misc-info=, read
+from the registry. The feed is a separate
 ro mount, never inside the workbook dir:
 =-v $WB_DIR:/work:rw -v $FEED:/feed:ro=.
 
 *Remote sandboxes: pull.* =devops-bb-sandbox-pull= runs =rsync -r
 --no-links --exclude '.*'= from the sandbox into the local workbook
 dir: on a timer while attached, and right before each confirm, so the
-prompt reflects the latest. Symlinks and dotfiles never arrive. git by
-hand stays possible; TRAMP is not supported.
+prompt reflects the latest. Symlinks and dotfiles never arrive (PR
+10's spike). macOS's openrsync (protocol 29) is acceptable for this
+pull: the flags hold with it, and the README names it. git by hand
+stays possible; TRAMP is not supported.
 
 *The feed name is the operator's.* It is asked at attach (default: the
-file's base name), and goes in =status.json= and on every event as
+file's base name), passed as =publish --name= (default there: the
+basename of =--to=), and goes in =status.json= and on every event as
 =feed=. It names the attachment, not the file, and stays the same
 across renames; a NATS subject later (below). It is never read from
 the workbook: Claude writes the workbook.
@@ -406,8 +527,11 @@ point the push, with the operator's ssh credentials, anywhere.
 *Renames.* Nothing to do. The subscriber is bound to the buffer, and
 each entry reads =file= when it is emitted, so after
 =set-visited-file-name= or a denote rename the next event carries the
-new path. The subscriber sends a =status= line when the buffer's file
-differs from the one it last sent, so =status.json= follows too.
+new path. =sandbox.clj= writes a =status= line,
+={"event":"status","file":…,"devops-mode":…}=, straight to the
+publisher: at attach, from =after-set-visited-file-name-hook=, and
+before an entry whenever the file differs from the one it last sent,
+so =status.json= follows too. It is not an event.
 
 *Shared shell sessions.* devops.el names sessions by target
 (=devops:web-1 /ssh:web-1:=), so two workbooks on the same target share
@@ -432,21 +556,30 @@ never runs =emacsclient=. What it pushes, Emacs handed it. Rules:
 1. *Output before event.* A line with =output= becomes
    =outputs/<id>.json= first, then the event, without =output=, is
    appended to =events.jsonl=. A consumer that sees the event can read
-   the output at once, so there is no =not-found= retry.
+   the output at once, so there is no =not-found= retry. =output= is the
+   full answer map, or text, from which the answer is built with the
+   entry's =session=, =status=, =id= and =input= (then dropped from the
+   event). =output: null= writes no file. An id that is not a UUID is
+   dropped with a warning, so it never becomes a path.
 2. *Atomic.* Write to =.tmp=, rename. =events.jsonl= is append-only.
 3. *Numbered.* Each event gets =seq=, 1, 2, … from the attach, so
    =follow= can resume after a seq. Attaching starts a new feed:
    =events.jsonl= starts empty, =seq= at 1, and =status.json='s
-   =started= says when.
+   =started= says when. The writer empties =events.jsonl= before it
+   writes the new =status.json=, so a follower never takes old events
+   for the new feed.
 4. *Heartbeat.* =status.json= carries =publisher-time=, refreshed
    every few seconds, so the sandbox can tell a quiet workbook from a
    dead publisher, and =attached=, false once stdin closes. It names
    the =feed= and the =workbook= (mapped path), and =queued=, the
    events not yet pushed, so =follow= can say "publisher is N events
-   behind" instead of only "stale". It does not carry
-   =execution-log=: the log's path is the host's business.
-5. *Path mapping.* =--map HOST=SANDBOX= rewrites =file= (=buffer=
-   stays). Entries carry host paths; a sandbox that mounts elsewhere
+   behind" instead of only "stale", and =dropped= (rule 8). The
+   workbook comes from the first =status= line, or until then the
+   first event's =file=. It does not carry =execution-log=: the log's
+   path is the host's business. The heartbeat is every 3 s.
+5. *Path mapping.* =--map HOST=SANDBOX= (repeatable; the longest
+   prefix wins, on a path boundary) rewrites =file= and the workbook
+   (=buffer= stays). Entries carry host paths; a sandbox that mounts elsewhere
    still resolves the workbook in =status=, =follow= and =modified=.
    Same absolute path (no =--map=) remains the easy case for
    containers.
@@ -457,8 +590,10 @@ never runs =emacsclient=. What it pushes, Emacs handed it. Rules:
    One file carries status and output together, so one rename keeps it
    atomic. For grep in the sandbox: =jq -r .output outputs/ID.json=.
 7. *Capped.* An =output= over 500 lines or 64 KB, whichever comes
-   first, keeps its first 250 and last 250 lines (within the byte
-   cap), with one marker line between them: =[… N lines cut …]=. The
+   first, keeps its first 250 and last 250 lines (each half within
+   (max-bytes − 64) / 2 bytes; a line too long for its half is cut
+   short and counted as cut), with one marker line between them: =[…
+   N lines cut …]=. The
    answer then carries ="truncated": true= and the full size,
    ="lines"= and ="bytes"=. =--max-lines= and =--max-bytes= change the
    caps; they are given at attach, like the sink. A run's start says
@@ -466,10 +601,15 @@ never runs =emacsclient=. What it pushes, Emacs handed it. Rules:
    protects the sink and Claude's context; host mode's =run-output= is
    not capped.
 8. *Never blocks Emacs.* A reader thread drains stdin into an
-   in-memory queue, capping each line as it takes it, so memory stays
-   bounded; a writer thread pushes to the sink in order, retrying with
-   backoff. A hung ssh never fills the pipe, so =process-send-string=
-   in ob-comint's filter never blocks the operator's Emacs.
+   in-memory queue, capping each line as it takes it; a writer thread
+   pushes to the sink in order, retrying with backoff (100 ms up to
+   5 s), and also starts the feed, so a sink that hangs at startup
+   still never blocks stdin. A hung ssh never fills the pipe, so
+   =process-send-string= in ob-comint's filter never blocks the
+   operator's Emacs (PR 3's spike: a child that stops reading froze
+   Emacs for 10 s). Memory stays bounded by count too: past 10000
+   unpushed events the reader drops lines and counts them in
+   =dropped=, rather than block stdin.
 9. *Retries are safe.* =put= is a rename. A retried =append= may land
    twice; the reader skips any event whose =seq= is not above the last
    it saw.
@@ -487,11 +627,21 @@ to =--to=) and =append(line)= (one JSON line, always appended to
 | container (no mount)  | =--via "docker exec -i box" --to /feed=        |
 | Tailscale / SSH node  | =--ssh feed@node --to /home/feed/feed=         |
 
-With =--via CMD= and =--to TO=, =put= runs =CMD sh -c 'cat > F.tmp &&
-mv F.tmp F'= (=F= is =TO/path=) and =append= runs =CMD sh -c 'cat >>
-TO/events.jsonl'=. Anything that runs a command somewhere fits:
-=docker exec -i=, =podman exec -i=, =kubectl exec -i=. No TRAMP
-re-implementation.
+With =--via CMD= (split into shell words) and =--to TO= (absolute),
+each push runs =CMD sh -c SCRIPT=, paths quoted into SCRIPT. Anything
+that runs a command somewhere fits: =docker exec -i=, =podman exec -i=,
+=kubectl exec -i=. No TRAMP re-implementation. SCRIPT never waits for
+EOF: =docker exec -i= sometimes loses an EOF sent before the command
+starts, and a =cat= then hangs in the container for good, killing the
+host side does not stop it (PR 9). So SCRIPT reads the event line with
+=read -r=, then the output, sent last, with =head -c N= and a size
+check. It removes =F.tmp=, writes it under =set -C=, and renames it to
+=F=; for a result it renames before it appends. It exits 3 when =TO=,
+=TO/outputs=, =F= or =F.tmp= is a symlink, and refuses feed paths with
+=..= or a leading =/=. A command that doesn't finish in 30 s is killed
+and retried. =--via "ssh …"= does not work: ssh re-joins and re-parses
+the remote command, so SCRIPT would need quoting twice. ssh is =--ssh=
+only.
 
 *The push is a connection into a machine Claude controls*, so for ssh
 it is built in, not left to the operator's config:
@@ -500,8 +650,8 @@ it is built in, not left to the operator's config:
   ClearAllForwardings=yes -o PermitLocalCommand=no HOST …=. A
   =ForwardAgent yes= in =~/.ssh/config= (or =Host *=) would otherwise
   hand the node a live socket to the operator's agent, and Claude could
-  =ssh web-1= with it. =--via "ssh …"= still works, with a loud README
-  warning.
+  =ssh web-1= with it. =--ssh= quotes SCRIPT for the remote shell
+  itself.
 - *A =feed= user.* The README sets up a =feed= account on the node
   that owns the feed dir; Claude's user may read it, never write it.
   Otherwise Claude can replace =outputs/= with a symlink and the push
@@ -514,10 +664,11 @@ it is built in, not left to the operator's config:
 
 *One round trip per result.* A result is a =put= and an =append=. Over
 =--ssh= or =--via= the publisher sends both in one command, so a run costs one
-connection, not two: =CMD sh -c '…'= reads the output, then the event
-line, from stdin, and does the rename before the append, keeping
+connection, not two: =CMD sh -c '…'= reads the event line, then the
+output, from stdin, and does the rename before the append, keeping
 "output before event". The heartbeat is a =put= of its own, every few
-seconds. For ssh, the README recommends =ControlMaster= so each command
+seconds. A =docker exec= costs ~55 ms (PR 9's spike), so one command
+per result keeps up. For ssh, the README recommends =ControlMaster= so each command
 reuses one connection.
 
 Why push, not pull: a pull would give the sandbox a way into the host.
@@ -535,9 +686,10 @@ in the tests, =publish= takes them and reads its lines from stdin.
 - The commands read the feed through =feed.clj='s reader (=status=,
   =events-after seq=, =output id=), the one place a NATS reader would
   replace later.
-- =status=: =status.json=. =follow=: tail =events.jsonl=, printing each
-  event's =seq=; =--after SEQ= resumes. =run-output ID=:
-  =outputs/ID.json=, or the =not-found= answer shape. =run-output=
+- =status=: =status.json=. =follow=: tail =events.jsonl=, printing
+  =SEQ summary= per event; without =--after= only new events, as in host
+  mode; =--after SEQ= resumes, =--after 0= replays the feed. =run-output
+  ID=: =outputs/ID.json=, or the =not-found= answer shape. =run-output=
   checks ID is a UUID (no path traversal).
 - =status= names the feed and the workbook. =follow= needs no =--dir=:
   every event is the workbook's.
@@ -547,11 +699,17 @@ in the tests, =publish= takes them and reads its lines from stdin.
   is a check, not a lock: the operator can start typing between check
   and write. Emacs still catches that and warns on the next edit that
   the file changed on disk.
-- =output=, =sessions=, =revert=, =tools=, =drift=, =dashboard's Emacs views=: fail
-  with ="needs Emacs, which this sandbox cannot reach"=. Dropped on
-  purpose; the operator is the channel for them.
-- =follow= in feed mode warns once when =publisher-time= is stale, and
-  says so when =attached= is false.
+- =modified=: FILE is optional in feed mode, still required on the
+  host.
+- =output=, =sessions=, =revert=, =tools=, =drift=: fail with ="needs
+  Emacs, which this sandbox cannot reach"=. Dropped on purpose; the
+  operator is the channel for them. The dashboard follows
+  =FEED/events.jsonl=, and a run's detail says the same; =e= does
+  nothing.
+- =follow= notices go to stderr as =notice: …=, once per episode: a
+  stale heartbeat (over 15 s), "publisher is N events behind" (with
+  it, or alone when =queued= > 0 in two heartbeats running), detached,
+  and "feed restarted at T: seq starts again at 1".
 - A =truncated= output: the skill tells Claude to say so, and to write
   a block that prints less (a filter, =head=, =grep=) instead of asking
   for the whole thing.
@@ -569,8 +727,12 @@ the event with ="id"=, ="sync": true= and the =output= from
 =devops-bb-scripting--results-text=, capped the same way. A =:file=
 result sends its link text; Claude reads the file through the
 workbook dir. =outputs/<id>.json= keeps the =run-output= shape:
-=session= null, =status= =done=, =input= the block's body. An entry
-with an =error= (="Not run on a #+TARGET"=) passes with =output= null.
+=session= null, =status= =done=, =input= the block's body. A sync
+=execute= always sends its =#+RESULTS= and keeps any =error= field: "Not
+run on a #+TARGET" is what every sync block off a target carries
+(=emacs-lisp=, =mermaid=). Other entries with an =error= (=tangle=,
+=drift=) carry no output. A sync =execute= usually follows the =modify=
+entry of its =#+RESULTS= write.
 
 The output of a sync run is =#+RESULTS=, which org may have formatted
 (tables, value results), not raw stdout, and stderr is lost unless
@@ -664,24 +826,32 @@ the block captures it. =output FILE LINE= is not in feed mode.
 | File                            | Change                                                        |
 |---------------------------------+---------------------------------------------------------------|
 | =emacs/devops/bb/log.clj=       | =emit= and subscribers; the log file is one                   |
-| =emacs/devops/bb/sandbox.clj=   | new, cljbang: registry, attach / detach, subscriber, publisher child, sentinel, pull; review: fingerprint, dir check, notices, =hack-local-variables= / vc advice |
-| =emacs/devops-bb-scripting.el=  | =devops-bb-scripting--run=: one run by ID; =run-output= uses it |
+| =emacs/devops/bb/sandbox.clj=   | new, cljbang: registry, attach / detach, subscriber, publisher child, sentinel, quit hook, pull; wires in the review |
+| =emacs/devops-bb-review.el=     | new, elisp (advice on org internals): fingerprint, confirm advice, header-elisp refusal, dir check, notices, =hack-local-variables= / vc / lock-file hardening |
+| =emacs/devops-bb-scripting.el=  | =devops-bb-scripting--run=: one run by ID; =run-output= uses it; =--head-tail= |
 | =emacs/test/devops-bb-test.el=  | dispatch by base buffer, attach, kill, rename, fingerprint, dir check, revert |
+| =test/container-check.sh=       | new: container sinks end to end with Docker, not in =bb test= |
 | devops.el                       | public =devops-resolving-target=, bound during resolution     |
 | ob-confirm-posframe             | =notice-functions=, =d= full diff, noweb-expanded preview, advice depth -90 |
 | =src/devops/bb/feed.clj=        | new: feed layout, =put=, =append=, the reader                 |
 | =src/devops/bb/publish.clj=     | new: stdin → queue → capped outputs, numbered events; retry; heartbeat with =queued=; sinks incl. =--ssh= |
 | =src/devops/bb/cli.clj=         | feed mode switch in each command; =publish= command           |
-| =bb.edn=                        | task =publish=                                                |
+| =bb.edn=                        | task =publish=; =test-emacs= takes =OB_CONFIRM_POSFRAME= like =DEVOPS_EL= |
 | =skills/devops-bb/SKILL.md=     | "Sandbox / feed mode" section                                 |
 | =README.md=                     | same, plus the sinks table                                    |
 
 * Steps
 
 Each L2 is one PR. The devops.bb PRs are a stack: each branches from
-the one above it (=:BASE:=), and the first from =main=. PRs 5 and 6 are
-in other repos (devops.el, ob-confirm-posframe), merge on their own,
-and must land before PR 8.
+the one above it (=:BASE:=), and the first from =main=. Branch names
+use a dash, =sandbox-NN-…=: git cannot hold =sandbox/…= next to the
+=sandbox= branch. PRs 5 and 6 are in other repos (devops.el,
+ob-confirm-posframe), merge on their own, and must land before PR 8.
+PRs 1-7 are merged; PR 8 now branches from =main=.
+
+Commits are signed through 1Password (=commit.gpgsign=); when signing
+fails, the work stays staged with its message in a file, for the
+operator to commit.
 
 *Spikes come first.* A spike answers a question the spec takes for
 granted. Run them all before PR 1: an answer that contradicts the spec
@@ -696,9 +866,9 @@ map, or says why.
 Until PR 8 merges, an attached buffer has no review. Don't attach a
 real sandbox to any branch below it.
 
-** TODO 1. Events: =emit= and subscribers
+** DONE 1. Events: =emit= and subscribers
 :PROPERTIES:
-:BRANCH:   sandbox/01-emit
+:BRANCH:   sandbox-01-emit
 :BASE:     main
 :END:
 
@@ -768,21 +938,21 @@ then the cleanup.
 
 *** Done when
 
-- [ ] =emit= builds an entry once and calls each subscriber with it.
+- [X] =emit= builds an entry once and calls each subscriber with it.
   The log file subscriber writes the same lines as before; the log
   tests pass unchanged.
-- [ ] Subscribers are global or per base buffer. =emit= looks up =(or
+- [X] Subscribers are global or per base buffer. =emit= looks up =(or
   (buffer-base-buffer) (current-buffer))=, so a run from an indirect
   buffer reaches its base buffer's subscribers (ERT).
-- [ ] Only the log subscriber needs =devops-bb-execution-log= to be
+- [X] Only the log subscriber needs =devops-bb-execution-log= to be
   set. All of them still need =devops-mode= and =devops-user-run-p=.
-- [ ] A subscriber that signals is reported in =*Messages*=. The
+- [X] A subscriber that signals is reported in =*Messages*=. The
   others, the log and the block run go on (ERT).
 
-** TODO 2. One run by ID: =devops-bb-scripting--run=
+** DONE 2. One run by ID: =devops-bb-scripting--run=
 :PROPERTIES:
-:BRANCH:   sandbox/02-run-by-id
-:BASE:     sandbox/01-emit
+:BRANCH:   sandbox-02-run-by-id
+:BASE:     sandbox-01-emit
 :END:
 
 *** Spike: what does the full scan cost?                            :local:
@@ -810,22 +980,22 @@ the last alike (the scan is the whole session either way).
 
 *** Done when
 
-- [ ] =devops-bb-scripting--run SESSION ID= searches only that ID's
+- [X] =devops-bb-scripting--run SESSION ID= searches only that ID's
   start and end markers and returns the =run-output= answer.
-- [ ] =devops-bb-scripting-run-output= uses it, and its tests pass
+- [X] =devops-bb-scripting-run-output= uses it, and its tests pass
   unchanged.
-- [ ] ERT: in a session with two runs, the second run's ID returns only
+- [X] ERT: in a session with two runs, the second run's ID returns only
   its own output. An unknown ID returns =not-found=, and a run that is
   still going returns =running=.
-- [ ] A head/tail helper keeps at most N bytes of output (the first
+- [X] A head/tail helper keeps at most N bytes of output (the first
   N/2 and the last N/2) for the subscriber's rough cap, with a test
   on a 2000-line output.
-- [ ] The spike's numbers, before and after, are in the PR.
+- [X] The spike's numbers, before and after, are in the PR.
 
-** TODO 3. The feed, and =publish= to a local directory
+** DONE 3. The feed, and =publish= to a local directory
 :PROPERTIES:
-:BRANCH:   sandbox/03-publish
-:BASE:     sandbox/02-run-by-id
+:BRANCH:   sandbox-03-publish
+:BASE:     sandbox-02-run-by-id
 :END:
 
 =feed.clj= (layout, =put=, =append=, the reader) and =publish.clj=
@@ -878,28 +1048,28 @@ Expected: =100000=, in well under a second.
 
 *** Done when
 
-- [ ] =printf … | devops-bb publish --to FEED= fills a feed: each
+- [X] =printf … | devops-bb publish --to FEED= fills a feed: each
   output's file is in place before its event, events are numbered by
   =seq= from 1, =status.json= has a heartbeat and =queued=, and
   =attached= is false at EOF.
-- [ ] A 2000-line output keeps its first and last 250 lines, with the
+- [X] A 2000-line output keeps its first and last 250 lines, with the
   =[… N lines cut …]= marker, =truncated=, =lines= and =bytes=; the
   byte cap is tested too. =--max-lines= and =--max-bytes= change the caps.
-- [ ] A sink that hangs: the publisher keeps reading stdin, =queued=
+- [X] A sink that hangs: the publisher keeps reading stdin, =queued=
   grows, and memory stays bounded (test with a fake sink).
-- [ ] Every write is atomic (=.tmp= then rename); =events.jsonl= is only
+- [X] Every write is atomic (=.tmp= then rename); =events.jsonl= is only
   appended to.
-- [ ] =--map HOST=SANDBOX= rewrites =file= and not =buffer=.
-- [ ] =publish= has no =--server= or =--file= option, and no
+- [X] =--map HOST=SANDBOX= rewrites =file= and not =buffer=.
+- [X] =publish= has no =--server= or =--file= option, and no
   =emacsclient= process starts (asserted as in PR 4).
-- [ ] =feed-test= covers the publisher from stdin and the reader,
+- [X] =feed-test= covers the publisher from stdin and the reader,
   including a duplicate append that the reader skips by =seq=. Task
   =publish= is in =bb.edn=.
 
-** TODO 4. Consumer: feed mode
+** DONE 4. Consumer: feed mode
 :PROPERTIES:
-:BRANCH:   sandbox/04-feed-mode
-:BASE:     sandbox/03-publish
+:BRANCH:   sandbox-04-feed-mode
+:BASE:     sandbox-03-publish
 :END:
 
 *** Spike: can a test see =emacsclient= start?                      :local:
@@ -922,28 +1092,28 @@ finds =emacsclient= without =PATH=, and the test needs another hook.
 
 *** Done when
 
-- [ ] =DEVOPS_BB_FEED=DIR= or =--feed DIR= turns feed mode on. It is
+- [X] =DEVOPS_BB_FEED=DIR= or =--feed DIR= turns feed mode on. It is
   never detected automatically.
-- [ ] Every command reads the feed through =feed.clj='s reader.
-- [ ] =status= prints =status.json= and names the feed and the
+- [X] Every command reads the feed through =feed.clj='s reader.
+- [X] =status= prints =status.json= and names the feed and the
   workbook.
-- [ ] =follow= prints each event's =seq=, and =--after SEQ= resumes
+- [X] =follow= prints each event's =seq=, and =--after SEQ= resumes
   after it. It warns once when =publisher-time= is stale, says when
   =attached= is false, and says "publisher is N events behind" from
   =queued=. A feed restart (a new =started=) is reported.
-- [ ] =run-output ID= prints =outputs/ID.json= exactly as written, or
+- [X] =run-output ID= prints =outputs/ID.json= exactly as written, or
   the =not-found= shape. An ID that is not a UUID is refused.
-- [ ] =modified [FILE]= reports the last =modify= / =save= /
+- [X] =modified [FILE]= reports the last =modify= / =save= /
   =revert= / =kill= event. Any FILE other than the workbook fails with
   "not this sandbox's workbook".
-- [ ] =output=, =sessions=, =revert=, =tools=, =drift= and the
+- [X] =output=, =sessions=, =revert=, =tools=, =drift= and the
   dashboard's Emacs views fail with "needs Emacs, which this sandbox
   cannot reach".
-- [ ] =cli-test=: with no socket and the fake =emacsclient= on =PATH=,
+- [X] =cli-test=: with no socket and the fake =emacsclient= on =PATH=,
   =status=, =follow=, =run-output= and =modified= answer, and the fake
   never runs.
 
-** TODO 5. devops.el: =devops-resolving-target=           :repo:devops.el:
+** DONE 5. devops.el: =devops-resolving-target=           :repo:devops.el:
 :PROPERTIES:
 :REPO:     ~/src/github.com/kpassapk/devops.el
 :BRANCH:   resolving-target
@@ -996,12 +1166,12 @@ without running a dynamic target's block twice.
 
 *** Done when
 
-- [ ] =devops-resolving-target= is =(TAG . REF)= while
+- [X] =devops-resolving-target= is =(TAG . REF)= while
   =devops--target-from-ref= runs, and nil otherwise, including after an
   error. Nested resolutions see the innermost one.
-- [ ] It is documented as public, with a test in devops.el.
+- [X] It is documented as public, with a test in devops.el.
 
-** TODO 6. ob-confirm-posframe: notices, =d=, noweb preview, depth -90  :repo:ob-confirm-posframe:
+** DONE 6. ob-confirm-posframe: notices, =d=, noweb preview, depth -90  :repo:ob-confirm-posframe:
 :PROPERTIES:
 :REPO:     ~/src/github.com/kpassapk/ob-confirm-posframe
 :BRANCH:   notices
@@ -1100,22 +1270,22 @@ puts ob-confirm-posframe's outside devops.el's.
 
 *** Done when
 
-- [ ] =ob-confirm-posframe-notice-functions=: each function returns
+- [X] =ob-confirm-posframe-notice-functions=: each function returns
   highlighted lines, which appear above the body.
-- [ ] =d= opens the full notice in a =diff-mode= window, for multi-file
+- [X] =d= opens the full notice in a =diff-mode= window, for multi-file
   diffs, then returns to the prompt.
-- [ ] An option shows the body with noweb references expanded; a call
+- [X] An option shows the body with noweb references expanded; a call
   =<<name()>>= is shown as written, with a notice, and never run
   (tested: the called block's side effect does not happen).
-- [ ] The advice is at depth -90. A block whose dynamic target runs
+- [X] The advice is at depth -90. A block whose dynamic target runs
   another block prompts as =outer › inner=, tested with a stand-in for
   devops.el.
-- [ ] =make test= covers notices, =d=, the preview and the depth.
+- [X] =make test= covers notices, =d=, the preview and the depth.
 
-** TODO 7. =devops-bb-sandbox-attach=: registry, subscriber, publisher
+** DONE 7. =devops-bb-sandbox-attach=: registry, subscriber, publisher
 :PROPERTIES:
-:BRANCH:   sandbox/07-attach
-:BASE:     sandbox/04-feed-mode
+:BRANCH:   sandbox-07-attach
+:BASE:     sandbox-04-feed-mode
 :END:
 
 =emacs/devops/bb/sandbox.clj=. No review yet; that is PR 8.
@@ -1188,40 +1358,44 @@ the ERT for indirect buffers.
 
 *** Done when
 
-- [ ] =devops-bb-sandbox-sinks= is a defcustom of named sinks. Attach
+- [X] =devops-bb-sandbox-sinks= is a defcustom of named sinks. Attach
   asks for a sink and a feed name (default: the file's base name),
   starts =devops-bb publish …= with stdin as a pipe, and registers the
   base buffer in the global registry.
-- [ ] Attach refuses a remote =buffer-file-name=, and refuses when
+- [X] Attach refuses a remote =buffer-file-name=, and refuses when
   =ob-confirm-posframe-mode= is off. It warns when the dir holds other
   =.org= files, and asks before replacing the sink of a buffer that is
   already attached.
-- [ ] The subscriber sends each entry from its buffer. A =result= gets
+- [X] The subscriber sends each entry from its buffer. A =result= gets
   its =output= through =devops-bb-scripting--run= with the rough cap.
   A sync =execute= gets a new UUID, ="sync": true= and =#+RESULTS= as
-  =output=. An entry with an =error= passes with =output= null.
-- [ ] Two attached buffers in one Emacs give two feeds, and neither
+  =output=, keeping any =error=; other entries with an =error= pass
+  with =output= null (Caveats).
+- [X] Two attached buffers in one Emacs give two feeds, and neither
   holds the other's events, while blocks run in both.
-- [ ] Killing a buffer sends its =kill= event, then closes stdin. The
+- [X] Killing a buffer sends its =kill= event, then closes stdin. The
   publisher pushes what it has and exits. Detach and quitting Emacs do
-  the same, as the spike allows.
-- [ ] A rename (=set-visited-file-name=, denote) keeps the feed. The
+  the same, as the spike allows (batch Emacs, tested).
+- [ ] Quitting a real, interactive Emacs with an attached buffer
+  flushes the feed (the operator checks by hand).
+- [X] A rename (=set-visited-file-name=, denote) keeps the feed. The
   next event carries the new path, and a =status= line updates
   =status.json=.
-- [ ] A run from an indirect buffer reaches its base buffer's feed.
-  Killing the indirect buffer does nothing.
-- [ ] A dead publisher shows =sandbox: DEAD= in the mode line, and
+- [X] A run from an indirect buffer reaches its base buffer's feed.
+  Killing the indirect buffer does nothing: its =kill= entry is
+  dropped.
+- [X] A dead publisher shows =sandbox: DEAD= in the mode line, and
   attach offers to restart it as a new feed.
-- [ ] Attached buffers get =backup-by-copying=.
-- [ ] ERT covers attach, two buffers, kill, rename, indirect buffers,
+- [X] Attached buffers get =backup-by-copying=.
+- [X] ERT covers attach, two buffers, kill, rename, indirect buffers,
   sync blocks and a dead publisher, with a fake =publish= that records
   its stdin.
-- [ ] The mermaid block in Spec is re-run, and =spec.png= is updated.
+- [X] The mermaid block in Spec is re-run, and =spec.png= is updated.
 
 ** TODO 8. Review: fingerprint, dir check, revert hardening
 :PROPERTIES:
-:BRANCH:   sandbox/08-review
-:BASE:     sandbox/07-attach
+:BRANCH:   sandbox-08-review
+:BASE:     main
 :END:
 
 Needs PRs 5 and 6 merged. Uses the answers to PR 6's "what runs before
@@ -1316,8 +1490,8 @@ From outside Emacs, as Claude would:
 
 ** TODO 9. Container sinks: ro mount, then =--via "docker exec -i"=
 :PROPERTIES:
-:BRANCH:   sandbox/09-container
-:BASE:     sandbox/08-review
+:BRANCH:   sandbox-09-container
+:BASE:     sandbox-08-review
 :END:
 
 *** Spike: what does a =docker exec -i= cost?                       :docker:
@@ -1368,13 +1542,16 @@ host's.
 
 *** Done when
 
-- [ ] =--via CMD --to TO= does =put= and =append= as the spec says, and
-  a result costs one command.
-- [ ] The same feed works through a ro mount and through =docker exec
-  -i=, with Claude Code in the container running =status=, =follow= and
-  =run-output=.
-- [ ] The workbook dir is mounted rw as a dir, not a file. A save from
+- [X] =--via CMD --to TO= does =put= and =append= as the spec says, and
+  a result costs one command. Its scripts never wait for EOF.
+- [X] The same feed works through a ro mount and through =docker exec
+  -i=, with =devops-bb= in the container running =status=, =follow= and
+  =run-output= (=test/container-check.sh=). Claude Code in the
+  container is PR 12's spike.
+- [X] The workbook dir is mounted rw as a dir, not a file. A save from
   Emacs, which renames the file, is seen in the container.
+- [ ] The image has babashka 1.13.226 or later and =git=, with deps
+  resolved at build.
 - [ ] In the container, as Claude's user: the credential check from PR
   10 prints =none= for every file. Writing to =/feed= fails.
 - [ ] README: the container rows of the sinks table, and the =docker
@@ -1382,8 +1559,8 @@ host's.
 
 ** TODO 10. =--ssh= sink and pull, to a Tailscale node
 :PROPERTIES:
-:BRANCH:   sandbox/10-ssh
-:BASE:     sandbox/09-container
+:BRANCH:   sandbox-10-ssh
+:BASE:     sandbox-09-container
 :END:
 
 *** Spike: the node cannot reach the servers                          :node:
@@ -1482,12 +1659,15 @@ files Claude deletes should go too (=--delete=, not
   =run-output= on the node see them. Claude's edits are pulled and
   prompt with the diff.
 - [ ] The rsync version check and the two node checks are in the
-  README, as the steps for setting up a node.
+  README, as the steps for setting up a node. macOS's openrsync is
+  named as acceptable.
+- [ ] =--ssh= quotes the remote script itself; =--via "ssh …"= is
+  refused or documented as unsupported.
 
 ** TODO 11. A repo in the sandbox: aly-clojure
 :PROPERTIES:
-:BRANCH:   sandbox/11-repo
-:BASE:     sandbox/10-ssh
+:BRANCH:   sandbox-11-repo
+:BASE:     sandbox-10-ssh
 :END:
 
 *** Spike: bundle round trip                                        :local:
@@ -1548,11 +1728,13 @@ lands it in =refs/sandbox/=. The command that works goes in the skill.
   bundle's commit SHAs, so a new bundle prompts again.
 - [ ] Nothing on the host runs git in a dir Claude writes. The
   workbook dir never holds =.git=.
+- [ ] Session blocks and the skill run git with =--no-pager= (PR 11's
+  spike: a pager in the session swallows the next line).
 
 ** TODO 12. Skill and README
 :PROPERTIES:
-:BRANCH:   sandbox/12-docs
-:BASE:     sandbox/11-repo
+:BRANCH:   sandbox-12-docs
+:BASE:     sandbox-11-repo
 :END:
 
 *** Spike: a fresh Claude, the skill only                        :docker:
