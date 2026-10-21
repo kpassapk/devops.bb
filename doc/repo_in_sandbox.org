@@ -1,7 +1,8 @@
-#+TARGET: project ..
-#+TARGET: todos   ~/src/github.com/kpassapk/bb-todo-api
-#+TARGET: core    ~/src/github.com/kpassapk/bb-todo-api-core
-#+TARGET: api     ~/src/github.com/kpassapk/bb-todo-api-api
+#+TARGET: project  ..
+#+TARGET: kpassapk ~/src/github.com/kpassapk
+#+TARGET: todos    ~/src/github.com/kpassapk/bb-todo-api
+#+TARGET: core     ~/src/github.com/kpassapk/bb-todo-api-core
+#+TARGET: api      ~/src/github.com/kpassapk/bb-todo-api-api
 #+PROPERTY: header-args:sh :results output
 
 * Intro
@@ -36,7 +37,7 @@ directory:
 2. The agent clones it into its own copy in the container, edits, tests
    and commits there, and bundles its new commits back.
 3. You fetch that into =refs/sandbox/*=, read the commits, and only
-   then move your branch.
+   then move your branch. ("land" the commits.)
 4. You push. It is the one step that needs a credential, so it is a
    block you run.
 
@@ -44,24 +45,26 @@ The workbook is not part of the PRs. The agent never commits under
 =work/= (its tools and yours refuse), and each worktree's =work/= is
 only a working copy of the workbook.
 
-Operator:
+Who owns what:
+
+*Operator*:
 - your checkout, the worktrees, seeding, landing, the push
 
-Agent:
+*Agent*:
 - its clone in the container: edits, =bb test=, commits, the outgoing
   bundle
 
-Both:
+*Both*:
 - the workbook, and the bundle files beside it
 
-The steps use the =devops-bb= tasks =wt-add=, =wt-seed=, =wt-land=,
-=wt-status= (you) and =repo-clone=, =repo-handoff=, =repo-rebase= (the
+The steps use the =devops-bb= tasks =worktree add=, =worktree seed=, =worktree land=,
+=worktree status= (you) and =repo clone=, =repo handoff=, =repo rebase= (the
 agent). =devops-bb= is =bin/devops-bb= of this repo, on your =PATH=.
 
 #+begin_quote
 Status: the push notice that shows the commit log, and the fingerprint
 over the bundle's commit SHAs (spec PR 11), are not built yet. Until
-then, read the log with =wt-land= before you run a push block.
+then, read the log with =worktree land= before you run a push block.
 #+end_quote
 
 * Setup                                                              :project:
@@ -75,55 +78,92 @@ Check out bb-todo-api, and keep its workbooks out of git without
 touching its =.gitignore=:
 
 #+begin_src sh :dir ~/src/github.com/kpassapk
-git clone git@github.com:kpassapk/bb-todo-api.git
-echo 'work/' >> bb-todo-api/.git/info/exclude
-mkdir -p bb-todo-api/work
+  git clone git@github.com:kpassapk/bb-todo-api.git
+  echo 'work/' >> bb-todo-api/.git/info/exclude
+  mkdir -p bb-todo-api/work
 #+end_src
+
+#+RESULTS:
 
 Look at what is there: a model with =add= and =all=, one test, and
 =bb test=:
 
-#+begin_src sh :dir ~/src/github.com/kpassapk/bb-todo-api
-cat src/todos/core.clj
+* Inspect the project                                                 :todos:
+
+#+begin_src sh :results output :wrap src clojure
+  cat src/todos/core.clj
+#+end_src
+
+#+RESULTS:
+#+begin_src clojure
+(ns todos.core
+  "The todo model. A store is a plain map; every function is pure and
+  returns a new store, so there is no I/O here.")
+
+(def empty-store {:next-id 1 :todos {}})
+
+(defn add
+  "Add a todo titled TITLE. Returns [store todo]."
+  [store title]
+  (let [id   (:next-id store)
+        todo {:id id :title title :done? false}]
+    [(-> store
+         (assoc-in [:todos id] todo)
+         (update :next-id inc))
+     todo]))
+
+(defn all
+  "Every todo, oldest first."
+  [store]
+  (sort-by :id (vals (:todos store))))
+#+end_src
+
+#+begin_src sh
 bb test
 #+end_src
 
-Create the workbook. Only headings with a =:BRANCH:= are tasks, and what
+#+RESULTS:
+: Testing todos.core-test
+: 
+: Ran 1 tests containing 3 assertions.
+: 0 failures, 0 errors.
+
+** Create the workbook.
+
+Only headings with a =:BRANCH:= are tasks, and what
 the agent is told is the text under them:
 
-#+begin_src sh :dir ~/src/github.com/kpassapk/bb-todo-api
-cat > work/todos.org <<'EOF'
-#+TITLE: bb-todo-api
-#+PROPERTY: header-args:sh :results output
+#+begin_src org :tangle work/todos.org
+  #+TITLE: bb-todo-api
+  #+PROPERTY: header-args:sh :results output
 
-* TODO Core: completing todos
-:PROPERTIES:
-:BRANCH: core
-:BASE:   main
-:END:
+  * TODO Core: completing todos
+  :PROPERTIES:
+  :BRANCH: core
+  :BASE:   main
+  :END:
 
-Add =complete= to todos.core: it marks a todo done. Add a test, run
-=bb test=, and commit.
+  Add =complete= to todos.core: it marks a todo done. Add a test, run
+  =bb test=, and commit.
 
-* TODO API
-:PROPERTIES:
-:BRANCH: api
-:BASE:   core
-:END:
+  * TODO API
+  :PROPERTIES:
+  :BRANCH: api
+  :BASE:   core
+  :END:
 
-Add src/todos/api.clj: a Ring handler, =(handler store-atom)=, which
-keeps the store in an atom and speaks JSON (cheshire):
+  Add src/todos/api.clj: a Ring handler, =(handler store-atom)=, which
+  keeps the store in an atom and speaks JSON (cheshire):
 
-- GET /todos lists the todos.
-- POST /todos with {"title": ...} adds one and answers 201 with it.
-- POST /todos/:id/complete answers the updated todo, and 404 with
-  {"error": ...} for an id that does not exist.
+  - GET /todos lists the todos.
+  - POST /todos with {"title": ...} adds one and answers 201 with it.
+  - POST /todos/:id/complete answers the updated todo, and 404 with
+    {"error": ...} for an id that does not exist.
 
-Test it by calling the handler with request maps, and run =bb test=. Add
-a =bb serve= task (http-kit, port 8080) and start it once to check it.
-If the model cannot do what the API needs, fix it in core: that is the
-base's change, not this branch's.
-EOF
+  Test it by calling the handler with request maps, and run =bb test=. Add
+  a =bb serve= task (http-kit, port 8080) and start it once to check it.
+  If the model cannot do what the API needs, fix it in core: that is the
+  base's change, not this branch's.
 #+end_src
 
 The first heading does not say what =complete= does for an id that does
@@ -136,26 +176,55 @@ workbook copied in. The second branch is cut from the first, which now
 exists.
 
 #+begin_src sh
-devops-bb wt-add --workbook work/todos.org --heading "Core: completing todos"
-devops-bb wt-add --workbook work/todos.org --heading "API"
-devops-bb wt-status --workbook work/todos.org
+devops-bb worktree add --workbook work/todos.org --heading "Core: completing todos"
 #+end_src
+
+#+RESULTS:
+: /Users/kyle/src/github.com/kpassapk/bb-todo-api-core
+
+#+begin_src sh
+devops-bb worktree add --workbook work/todos.org --heading "API"
+#+end_src
+
+#+RESULTS:
+: /Users/kyle/src/github.com/kpassapk/bb-todo-api-api
+
+#+begin_src sh
+devops-bb worktree status --workbook work/todos.org
+#+end_src
+
+#+RESULTS:
+: core                     on main              0 commits  seed none    /Users/kyle/src/github.com/kpassapk/bb-todo-api-core
+: api                      on core              0 commits  seed none    /Users/kyle/src/github.com/kpassapk/bb-todo-api-api
 
 Expected: two paths, then a row per heading with =0 commits=, =seed none=
 and its worktree.
 
+* Start containers                                                 :kpassapk:
+
 Start a container on each worktree's =work/=, as in getting_started (the
 same =-e ANTHROPIC_API_KEY=, or log in):
 
-#+begin_src sh :results silent :dir ~/src/github.com/kpassapk
+#+begin_src sh :results silent
 podman run -d --name box-core -v $PWD/bb-todo-api-core/work:/work:rw localhost/devops-bb-sandbox
+#+end_src
+
+#+begin_src sh :results silent
 podman run -d --name box-api  -v $PWD/bb-todo-api-api/work:/work:rw localhost/devops-bb-sandbox
 #+end_src
+
+#+begin_src sh
+podman ps | grep "box-"
+#+end_src
+
+#+RESULTS:
+: e6cf270198d8  localhost/devops-bb-sandbox:latest    sleep infinity  About a minute ago  Up About a minute                                                                box-core
+: 4eea1f71ee78  localhost/devops-bb-sandbox:latest    sleep infinity  51 seconds ago      Up 51 seconds                                                                    box-api
 
 Add the sinks, then attach each worktree's workbook in Emacs, from its
 own buffer with =M-x devops-bb-sandbox-attach=:
 
-#+begin_src elisp
+#+begin_src elisp :results output
 (setq devops-bb-sandbox-sinks
       '(("core" :via "podman exec -i -u root box-core" :to "/feed"
          :map (("/Users/kyle/src/github.com/kpassapk/bb-todo-api-core/work" . "/work")))
@@ -163,29 +232,47 @@ own buffer with =M-x devops-bb-sandbox-attach=:
          :map (("/Users/kyle/src/github.com/kpassapk/bb-todo-api-api/work" . "/work")))))
 #+end_src
 
+#+RESULTS:
+
+* Attach
+
 #+begin_src elisp :results none
-(find-file "~/src/github.com/kpassapk/bb-todo-api-core/work/todos.org")
+  (find-file "~/src/github.com/kpassapk/bb-todo-api-core/work/todos.org")
+  (devops-bb-sandbox-attach "core" "todos")
 #+end_src
 
-The mode line should say =sandbox: core=. Do the same in the other
-worktree with =api=. Two buffers, two feeds; neither holds the other's
-events.
+The mode line should say =sandbox: core=.
+
+Do the same in the other worktree with =api=.
+
+#+begin_src elisp :results none
+  (find-file "~/src/github.com/kpassapk/bb-todo-api-api/work/todos.org")
+  (devops-bb-sandbox-attach "api" "todos")
+#+end_src
+
+Two buffers, two feeds. Neither holds the other's events.
 
 * First heading: Core                                                 :core:
 
 Seed the bundle, into this worktree's =work/=:
 
 #+begin_src sh
-devops-bb wt-seed --workbook work/todos.org --heading "Core: completing todos"
+devops-bb worktree seed --workbook work/todos.org --heading "Core: completing todos"
 #+end_src
+
+#+RESULTS:
+: /Users/kyle/src/github.com/kpassapk/bb-todo-api-core/work/bb-todo-api.bundle (base at 67102bd)
 
 Expected: =.../work/bb-todo-api.bundle (base at <sha>)=. It is a regular
 file, which the workbook directory allows.
 
 Open Claude in =box-core= (=devops-open-terminal-dwim= on the line):
 
+Put the point on the line below, and run =M-x devops-open-terminal-dwim=.
+Paste the command from your clipboard.
+
 #+begin_src sh
-podman exec -it box-core claude
+  podman exec -it box-core claude
 #+end_src
 
 Prompt:
@@ -198,12 +285,12 @@ todos" in /work/todos.org.
 That is all. The task is the heading, and the how is the skill.
 
 What to look for:
-- Claude runs =devops-bb status=, then =repo-clone --heading "Core:
+- Claude runs =devops-bb status=, then =repo clone --heading "Core:
   completing todos"=, and reads the model in its own clone. It writes no
   block: all of it is uncredentialed.
 - It runs =bb test= itself, with =git --no-pager=, and commits
   =src/todos/core.clj= and its test, and nothing under =work/=. Then it
-  runs =repo-handoff= and says which branch the bundle holds.
+  runs =repo handoff= and says which branch the bundle holds.
 - It adds a =** Result= under its heading in the workbook, after checking
   =modified=. It does not try to push.
 - It does not use a REPL or =clj=: the image has Babashka only.
@@ -213,8 +300,18 @@ What to look for:
 Fetch and read, which moves nothing:
 
 #+begin_src sh
-devops-bb wt-land --workbook ~/src/github.com/kpassapk/bb-todo-api-core/work/todos.org --heading "Core: completing todos"
+devops-bb worktree land --workbook ~/src/github.com/kpassapk/bb-todo-api-core/work/todos.org --heading "Core: completing todos"
 #+end_src
+
+#+RESULTS:
+: == core (ff)
+: c25f7d2 Add complete: mark a todo done
+: 
+:  src/todos/core.clj       | 9 +++++++++
+:  test/todos/core_test.clj | 8 ++++++++
+:  2 files changed, 17 insertions(+)
+: 
+: nothing moved; --apply to fast-forward
 
 Expected: === core (ff)= (it is cut from =main=, and =core= exists in
 your checkout at the same commit), then the log with a stat showing the
@@ -233,8 +330,8 @@ If you like it, move the branch (in its worktree, which has it checked
 out; =work/= keeps its edits):
 
 #+begin_src sh
-devops-bb wt-land --apply --workbook ~/src/github.com/kpassapk/bb-todo-api-core/work/todos.org --heading "Core: completing todos"
-devops-bb wt-status --workbook work/todos.org
+devops-bb worktree land --apply --workbook ~/src/github.com/kpassapk/bb-todo-api-core/work/todos.org --heading "Core: completing todos"
+devops-bb worktree status --workbook work/todos.org
 #+end_src
 
 * Second heading: API, and a fix to core                               :api:
@@ -243,7 +340,7 @@ The API is cut from the branch you just landed. Seed it from its own
 worktree:
 
 #+begin_src sh
-devops-bb wt-seed --workbook work/todos.org --heading "API"
+devops-bb worktree seed --workbook work/todos.org --heading "API"
 #+end_src
 
 Prompt, in =box-api=:
@@ -254,21 +351,21 @@ Use the devops-bb-sandbox skill. Do the heading "API" in
 #+end_example
 
 What to look for:
-- =repo-clone= puts it on =api=, cut from =core=, so it starts with
+- =repo clone= puts it on =api=, cut from =core=, so it starts with
   core's =complete=.
 - It runs =bb test= and the handler tests itself, and checks =bb serve=
   from inside the container (=curl localhost:8080=): uncredentialed.
 - Its 404 test shows =complete= cannot say "no such todo". It fixes that
   on a =core= branch in its clone (=git switch -c core origin/core=),
   rebases =api= onto it, and finishes the API.
-- =repo-handoff= lists /two/ branches. Its Result says which commits are
+- =repo handoff= lists /two/ branches. Its Result says which commits are
   for the base.
 
 Land both. The log shows the model fix under =core= and the handler
 under =api=:
 
 #+begin_src sh
-devops-bb wt-land --workbook ~/src/github.com/kpassapk/bb-todo-api-api/work/todos.org --heading "API"
+devops-bb worktree land --workbook ~/src/github.com/kpassapk/bb-todo-api-api/work/todos.org --heading "API"
 #+end_src
 
 The base's commit is reviewed as the base's. Then =--apply=: both move
@@ -284,17 +381,17 @@ printf '\nThe model is pure: see todos.core.\n' >> README.md
 git commit -qam "Note the model is pure"
 #+end_src
 
-=api= is now behind its base. =wt-status= says so, as =seed stale=:
+=api= is now behind its base. =worktree status= says so, as =seed stale=:
 
 #+begin_src sh :dir ~/src/github.com/kpassapk/bb-todo-api
-devops-bb wt-status --workbook work/todos.org
+devops-bb worktree status --workbook work/todos.org
 #+end_src
 
 Send the new base tip over. Run it against the API worktree's workbook,
 so the bundle lands in the =work/= its container sees:
 
 #+begin_src sh :dir ~/src/github.com/kpassapk/bb-todo-api-api
-devops-bb wt-seed --rebase --workbook work/todos.org --heading "API"
+devops-bb worktree seed --rebase --workbook work/todos.org --heading "API"
 #+end_src
 
 Tell Claude in =box-api=:
@@ -304,17 +401,17 @@ The base moved. /work/bb-todo-api.base.bundle has its new tip.
 #+end_example
 
 What to look for:
-- It runs =devops-bb repo-rebase --heading "API"=, and not its own =git
+- It runs =devops-bb repo rebase --heading "API"=, and not its own =git
   rebase=: it reports =api rebased onto <sha>=. A conflict is listed by
-  file; Claude resolves it and runs =repo-rebase --continue=.
-- It runs =bb test= again, then =repo-handoff=.
+  file; Claude resolves it and runs =repo rebase --continue=.
+- It runs =bb test= again, then =repo handoff=.
 
 Land it. This time the log is =(rebased)=: the same commits, rewritten
 on the new base, so your =api= is moved with =reset --keep= rather than
 a merge.
 
 #+begin_src sh
-devops-bb wt-land --apply --workbook ~/src/github.com/kpassapk/bb-todo-api-api/work/todos.org --heading "API"
+devops-bb worktree land --apply --workbook ~/src/github.com/kpassapk/bb-todo-api-api/work/todos.org --heading "API"
 #+end_src
 
 * Push, stacked (optional)
@@ -332,7 +429,7 @@ gh pr create --head api --base core --title "API" --body "Stacked on core."
 #+end_src
 
 When core merges, GitHub retargets the API's PR to =main=. Seed and
-=repo-rebase= again if you want the agent to follow a squash.
+=repo rebase= again if you want the agent to follow a squash.
 
 * Try to break it
 
@@ -341,9 +438,9 @@ Run these from a second terminal.
 - Put a repo in the workbook directory: =podman exec box-core git clone
   ~/bb-todo-api /work/bb-todo-api=. The mode line says sandbox:
   SUSPENDED (a =.git= is a dot-path) and runs are refused. Remove it.
-- Have Claude commit a file under =work/= in its clone. =repo-handoff=
+- Have Claude commit a file under =work/= in its clone. =repo handoff=
   refuses: "commits touch work/". If a bundle with one gets to the host
-  anyway (=git bundle create= by hand), =wt-land= refuses it too.
+  anyway (=git bundle create= by hand), =worktree land= refuses it too.
 - Plant a hook in the clone: =echo 'touch /tmp/pwned' >
   ~/bb-todo-api/.git/hooks/post-checkout=, then hand off and land. The
   hook is not in the bundle, and =/tmp/pwned= does not exist on your
@@ -352,7 +449,7 @@ Run these from a second terminal.
   container (=podman exec box-core ls ~/.ssh ~/.config/gh= finds
   neither).
 - Edit the same line of =complete= in core by hand, re-seed the API with
-  =--rebase= and have Claude run =repo-rebase=. It exits 2 and names the
+  =--rebase= and have Claude run =repo rebase=. It exits 2 and names the
   file.
 
 * Clean up                                                           :project:

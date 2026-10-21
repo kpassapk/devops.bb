@@ -374,7 +374,7 @@
   (run rebase! opts
        (fn [{:keys [conflict unchanged rebased onto]}]
          (cond conflict  (do (println "conflict in:" (str/join ", " conflict))
-                             (println "resolve, `git add', then `devops-bb repo-rebase --continue'")
+                             (println "resolve, `git add', then `devops-bb repo rebase --continue'")
                              (System/exit 2))
                unchanged (println "base unchanged")
                :else     (println (str rebased " rebased onto " (short onto)))))))
@@ -409,7 +409,7 @@
          (when-not (:apply opts)
            (println "\nnothing moved; --apply to fast-forward"))
          (when (some #(= :diverged (:state %)) rs)
-           (println "diverged: wt-seed --rebase, then the agent runs repo-rebase")
+           (println "diverged: worktree seed --rebase, then the agent runs repo rebase")
            (System/exit 2)))))
 
 (defn wt-status

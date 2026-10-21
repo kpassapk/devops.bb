@@ -207,20 +207,20 @@ workbook; pass `--heading "<its title or :ID:>"`.
 
 | Command | Does |
 |---|---|
-| `devops-bb repo-clone --heading H` | clones to `~/NAME`, on `:BRANCH:` cut from `:BASE:`; sets a git identity, no signing |
-| `devops-bb repo-handoff --heading H` | bundles every branch with commits origin lacks into `/work/NAME.out.bundle`, by name |
-| `devops-bb repo-rebase --heading H` | moves your branch onto its base's new tip, from `/work/NAME.base.bundle` |
+| `devops-bb repo clone --heading H` | clones to `~/NAME`, on `:BRANCH:` cut from `:BASE:`; sets a git identity, no signing |
+| `devops-bb repo handoff --heading H` | bundles every branch with commits origin lacks into `/work/NAME.out.bundle`, by name |
+| `devops-bb repo rebase --heading H` | moves your branch onto its base's new tip, from `/work/NAME.base.bundle` |
 
 Clone, edit, test and commit as freely as in any repo, and write no
 block for it. Use `git --no-pager` (or `GIT_PAGER=cat`).
 
 - **Never commit under `work/`.** It is the operator's workbook;
-  `repo-handoff` refuses, and so does the host.
+  `repo handoff` refuses, and so does the host.
 - **Babashka here, no JVM.** `bb` tasks and tests run (`bb test`); `clj`,
   `lein` and a REPL don't. If the repo's own notes (AGENTS.md, a README)
   need one, read the code instead, and say in your Result what you could
   not run.
-- **Hand back with `repo-handoff`, not your own `git bundle`.** It names
+- **Hand back with `repo handoff`, not your own `git bundle`.** It names
   the branches, which the host needs, and checks what you committed. Tell
   the operator which branches it holds, then wait: they fetch the bundle
   into `refs/sandbox/*` and read the commits. Nothing goes further
@@ -242,26 +242,26 @@ git switch -c BASE origin/BASE      # once
 git switch BRANCH && git rebase BASE
 ```
 
-Then `repo-handoff` carries both branches. Say in your Result which
+Then `repo handoff` carries both branches. Say in your Result which
 commits are for `BASE` (they belong to its heading, and the operator
 reviews them there).
 
 ### When the base has moved
 
 The operator says "the base moved" and puts `/work/NAME.base.bundle`
-there. Run `devops-bb repo-rebase --heading H`, not your own rebase: it
+there. Run `devops-bb repo rebase --heading H`, not your own rebase: it
 knows the base you were cut from, and which of your commits the new base
 already holds.
 
 - `base unchanged`: nothing to do.
 - `conflict in: FILES`: resolve them, `git add`, then `devops-bb
-  repo-rebase --heading H --continue`. Don't `git rebase --abort` without
+  repo rebase --heading H --continue`. Don't `git rebase --abort` without
   saying so.
 - If you made commits on a local `BASE`, bring it up to date after:
   `git switch BASE && git merge --ff-only origin/BASE`, then back to
   your branch.
 
-Then `repo-handoff` again.
+Then `repo handoff` again.
 
 ## Rules
 

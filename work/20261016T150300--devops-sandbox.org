@@ -1617,8 +1617,8 @@ lands it in =refs/sandbox/=. The command that works goes in the skill.
 
 *** Done when
 
-- [X] =devops-bb repo-clone=, =repo-handoff= and =repo-rebase= (agent)
-  and =wt-add=, =wt-seed=, =wt-land=, =wt-status= (operator), over a
+- [X] =devops-bb repo clone=, =repo handoff= and =repo rebase= (agent)
+  and =worktree add=, =worktree seed=, =worktree land=, =worktree status= (operator), over a
   heading's =:BRANCH:= / =:BASE:= (=src/devops/bb/repo.clj=, tested with
   real git: the core/API loop, a base that moves, a conflict, the
   =work/= guard). The agent-side ones also run in the image, as
@@ -1626,7 +1626,7 @@ lands it in =refs/sandbox/=. The command that works goes in the skill.
 - [X] The skill's "Your task is a heading" and "Code changes: your own
   clone": the heading is the task, clone and handoff are tasks, a fix to
   the base is a commit on the base branch, a moved base is
-  =repo-rebase=.
+  =repo rebase=.
 - [ ] bb-todo-api end to end, as =doc/repo_in_sandbox.org= walks it: a
   core heading and an API heading, two worktrees, a real Claude. Claude
   clones, edits, runs =bb test=, commits and hands back with no block
