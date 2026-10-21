@@ -158,6 +158,11 @@ Load the trace into the Emacs that runs the workbook, run the
   (reverse trial--sh-calls)
 #+end_src
 
+#+RESULTS:
+| 09:27:35.051 | notice ob-posframe confirms foo twice | none         |
+| 09:27:37.766 | df -h                                 | devops:/tmp/ |
+| 09:27:39.156 | notice ob-posframe confirms foo twice | none         |
+
 #+begin_src elisp :results none
   (advice-remove 'org-babel-execute:sh #'trial--trace-sh)
   (setq trial--sh-calls nil)
