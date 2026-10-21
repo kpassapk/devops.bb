@@ -195,7 +195,7 @@ tells Claude to treat it as data, not instructions.
 
 ** Code: the repo lives in the sandbox
 
-Developing in an existing repo, aly-clojure say, does not put the repo
+Developing in an existing repo, atomstream say, does not put the repo
 in the workbook dir: its dot-paths (=.git=, =.github=, =.clj-kondo=)
 would suspend it, hashing =target/= on every confirm is slow, and the
 operator would be approving =bb test=, which needs no credential.
@@ -798,8 +798,9 @@ the block captures it. =output FILE LINE= is not in feed mode.
   suspends the buffer; =:file ../x= is refused.
 - A sync block's =#+RESULTS= reaches the sandbox as an output.
 - A run from an indirect buffer reaches its base buffer's feed.
-- aly-clojure end to end: the host seeds a bundle, Claude clones,
-  edits, runs =bb test= and bundles back in the sandbox, the host
+- atomstream end to end (public, so the guide is repeatable): the host
+  seeds a bundle, Claude clones, edits, commits and bundles back in
+  the sandbox, the host
   fetches into =refs/sandbox/*=, and the push block prompts with the
   commit log; a new bundle re-prompts it.
 - =devops-bb-sandbox-attach= in two workbook buffers of one Emacs gives
@@ -1491,7 +1492,7 @@ From outside Emacs, as Claude would:
 - [ ] =bb test-emacs= covers the fingerprint, the dir check and revert
   hardening.
 
-** TODO 9. Container sinks: ro mount, then =--via "docker exec -i"=
+** DONE 9. Container sinks: ro mount, then =--via "docker exec -i"=
 :PROPERTIES:
 :BRANCH:   sandbox-09-container
 :BASE:     sandbox-08-review
@@ -1560,114 +1561,7 @@ host's.
 - [ ] README: the container rows of the sinks table, and the =docker
   run= line.
 
-** TODO 10. =--ssh= sink and pull, to a Tailscale node
-:PROPERTIES:
-:BRANCH:   sandbox-10-ssh
-:BASE:     sandbox-09-container
-:END:
-
-*** Spike: the node cannot reach the servers                          :node:
-
-The tailnet ACL must already be in place. From the node, as Claude's
-user, a real server must be unreachable. Expected: =blocked=.
-
-#+begin_src sh
-NODE=sandbox-node SERVER=web-1
-ssh -T -o ForwardAgent=no "$NODE" "nc -z -w 3 $SERVER 22 && echo REACHABLE || echo blocked"
-#+end_src
-
-*** Spike: no credential is on the node                               :node:
-
-Every line should say =none=:
-
-#+begin_src sh
-NODE=sandbox-node
-ssh -T -o ForwardAgent=no "$NODE" '
-  for f in ~/.ssh/id_* ~/.aws/credentials ~/.config/gh/hosts.yml ~/.kube/config ~/.git-credentials ~/.pgpass; do
-    [ -e "$f" ] && echo "FOUND $f" || echo "none $f"
-  done
-  [ -n "$SSH_AUTH_SOCK" ] && echo "FOUND agent $SSH_AUTH_SOCK" || echo "none agent"'
-#+end_src
-
-*** Spike: does =-o ForwardAgent=no= hold?                            :node:
-
-On the command line it beats =~/.ssh/config=. But a ControlMaster
-opened earlier with =-A= may hand its agent to every session that
-reuses it.
-
-#+begin_src sh
-NODE=sandbox-node
-ssh -G -o ForwardAgent=no "$NODE" | grep -i '^forwardagent'
-S=$(mktemp -u /tmp/spike-mux.XXXX)
-ssh -A -o ControlMaster=yes -o ControlPath="$S" -o ControlPersist=30 -fN "$NODE"
-ssh -T -o ForwardAgent=no -o ControlPath="$S" "$NODE" 'echo "agent: ${SSH_AUTH_SOCK:-none}"'
-ssh -o ControlPath="$S" -O exit "$NODE" 2>/dev/null
-#+end_src
-
-If the second command finds an agent, =--ssh= must also set its own
-=ControlPath=, under a dir devops-bb owns, so it never reuses the
-operator's masters. The README's =ControlMaster= advice changes to
-match.
-
-*** Spike: how much does ControlMaster save?                          :node:
-
-#+begin_src sh
-NODE=sandbox-node
-time (for i in $(seq 10); do ssh -T -o ControlPath=none "$NODE" true; done)
-S=$(mktemp -u /tmp/spike-mux.XXXX)
-time (for i in $(seq 10); do ssh -T -o ControlMaster=auto -o ControlPath="$S" -o ControlPersist=30 "$NODE" true; done)
-ssh -o ControlPath="$S" -O exit "$NODE" 2>/dev/null
-#+end_src
-
-*** Spike: what does the pull let through?                          :local:
-
-The node runs the =rsync= sender, and Claude controls the node. Check
-the local rsync for the 2025 sender-side CVEs (rsync 3.4.0 or later;
-macOS may ship openrsync), and what the flags let through:
-
-#+begin_src sh
-rsync --version | head -n 1
-s=$(mktemp -d); d=$(mktemp -d)
-mkdir -p "$s/a/.git" "$s/b"; touch "$s/.envrc" "$s/a/.git/config" "$s/b/x.py"
-ln -s /etc/passwd "$s/b/link"
-rsync -r --no-links --exclude '.*' "$s/" "$d/"; (cd "$d" && find . | sort)
-#+end_src
-
-#+RESULTS:
-: openrsync: protocol version 29
-: skipping non-regular file "b/link"
-: .
-: ./a
-: ./b
-: ./b/x.py
-
-Expected: =.=, =./a=, =./b= and =./b/x.py= only. Decide here whether
-files Claude deletes should go too (=--delete=, not
-=--delete-excluded=).
-
-*** Done when
-
-- [ ] =--ssh HOST= always passes the forwarding options from the spec,
-  plus the =ControlPath= rule if the spike asks for one. The pull's
-  =rsync -e= uses the same ssh command.
-- [ ] The README sets up a =feed= user that owns the feed dir; Claude's
-  user can read it and not write it. The remote script refuses when
-  =TO=, =TO/outputs= or the target is a symlink (tested by planting
-  one).
-- [ ] A result costs one ssh command, with output before event. The
-  heartbeat is its own =put=.
-- [ ] =devops-bb-sandbox-pull= runs on a timer while attached, and
-  right before each confirm. Symlinks and dotfiles never arrive.
-- [ ] End to end on the node: attach, run blocks, and =follow= /
-  =run-output= on the node see them. Claude's edits are pulled and
-  prompt with the diff.
-- [ ] The rsync version check and the two node checks are in the
-  README, as the steps for setting up a node. macOS's openrsync is
-  named as acceptable.
-- [ ] =--ssh= quotes the remote script itself; =--via "ssh …"= is
-  refused or documented as unsupported.
-
-** TODO 11. A repo in the sandbox: aly-clojure
+** TODO 11. A repo in the sandbox: atomstream
 :PROPERTIES:
 :BRANCH:   sandbox-11-repo
 :BASE:     sandbox-10-ssh
@@ -1681,7 +1575,7 @@ bundle made from =origin/main..HEAD= carries only =HEAD=, which the
 branch carries.
 
 #+begin_src sh
-REPO=~/src/github.com/unifica-ai/aly-clojure t=$(mktemp -d)
+REPO=~/src/github.com/kpassapk/atomstream t=$(mktemp -d)
 git -C "$REPO" bundle create "$t/seed.bundle" --all
 git clone -q "$t/seed.bundle" "$t/clone"
 git -C "$t/clone" switch -qc spike-feature
@@ -1723,9 +1617,21 @@ lands it in =refs/sandbox/=. The command that works goes in the skill.
 
 *** Done when
 
-- [ ] aly-clojure end to end: a block seeds the bundle; Claude clones,
-  edits, runs =bb test= and bundles back in the sandbox, with no block.
-  The host fetches into =refs/sandbox/*= with =fsckObjects=.
+- [X] =devops-bb repo-clone=, =repo-handoff= and =repo-rebase= (agent)
+  and =wt-add=, =wt-seed=, =wt-land=, =wt-status= (operator), over a
+  heading's =:BRANCH:= / =:BASE:= (=src/devops/bb/repo.clj=, tested with
+  real git: the core/API loop, a base that moves, a conflict, the
+  =work/= guard). The agent-side ones also run in the image, as
+  =claude=.
+- [X] The skill's "Your task is a heading" and "Code changes: your own
+  clone": the heading is the task, clone and handoff are tasks, a fix to
+  the base is a commit on the base branch, a moved base is
+  =repo-rebase=.
+- [ ] atomstream end to end, as =doc/repo_in_sandbox.org= walks it: two
+  headings, two worktrees, a real Claude. Claude clones, edits, commits
+  and hands back with no block (the image has no JVM, so no =clj=
+  tests); the host lands into =refs/sandbox/*= with =fsckObjects=, and
+  the second heading follows a moved first.
 - [ ] The push block's notice shows =git log --stat
   origin/main..refs/sandbox/<branch>=. Its fingerprint holds the
   bundle's commit SHAs, so a new bundle prompts again.
@@ -1860,4 +1766,111 @@ Rules in steps 4-5 (and the Spec section they rely on):
 - [ ] The workbook holds =.devcontainer= config and an attach, and
   nothing else for the sandbox.
 - [ ] Re-run from scratch, it gives a working container session.
+** TODO 10. =--ssh= sink and pull, to a Tailscale node
+:PROPERTIES:
+:BRANCH:   sandbox-10-ssh
+:BASE:     sandbox-09-container
+:END:
+
+*** Spike: the node cannot reach the servers                          :node:
+
+The tailnet ACL must already be in place. From the node, as Claude's
+user, a real server must be unreachable. Expected: =blocked=.
+
+#+begin_src sh
+NODE=sandbox-node SERVER=web-1
+ssh -T -o ForwardAgent=no "$NODE" "nc -z -w 3 $SERVER 22 && echo REACHABLE || echo blocked"
+#+end_src
+
+*** Spike: no credential is on the node                               :node:
+
+Every line should say =none=:
+
+#+begin_src sh
+NODE=sandbox-node
+ssh -T -o ForwardAgent=no "$NODE" '
+  for f in ~/.ssh/id_* ~/.aws/credentials ~/.config/gh/hosts.yml ~/.kube/config ~/.git-credentials ~/.pgpass; do
+    [ -e "$f" ] && echo "FOUND $f" || echo "none $f"
+  done
+  [ -n "$SSH_AUTH_SOCK" ] && echo "FOUND agent $SSH_AUTH_SOCK" || echo "none agent"'
+#+end_src
+
+*** Spike: does =-o ForwardAgent=no= hold?                            :node:
+
+On the command line it beats =~/.ssh/config=. But a ControlMaster
+opened earlier with =-A= may hand its agent to every session that
+reuses it.
+
+#+begin_src sh
+NODE=sandbox-node
+ssh -G -o ForwardAgent=no "$NODE" | grep -i '^forwardagent'
+S=$(mktemp -u /tmp/spike-mux.XXXX)
+ssh -A -o ControlMaster=yes -o ControlPath="$S" -o ControlPersist=30 -fN "$NODE"
+ssh -T -o ForwardAgent=no -o ControlPath="$S" "$NODE" 'echo "agent: ${SSH_AUTH_SOCK:-none}"'
+ssh -o ControlPath="$S" -O exit "$NODE" 2>/dev/null
+#+end_src
+
+If the second command finds an agent, =--ssh= must also set its own
+=ControlPath=, under a dir devops-bb owns, so it never reuses the
+operator's masters. The README's =ControlMaster= advice changes to
+match.
+
+*** Spike: how much does ControlMaster save?                          :node:
+
+#+begin_src sh
+NODE=sandbox-node
+time (for i in $(seq 10); do ssh -T -o ControlPath=none "$NODE" true; done)
+S=$(mktemp -u /tmp/spike-mux.XXXX)
+time (for i in $(seq 10); do ssh -T -o ControlMaster=auto -o ControlPath="$S" -o ControlPersist=30 "$NODE" true; done)
+ssh -o ControlPath="$S" -O exit "$NODE" 2>/dev/null
+#+end_src
+
+*** Spike: what does the pull let through?                          :local:
+
+The node runs the =rsync= sender, and Claude controls the node. Check
+the local rsync for the 2025 sender-side CVEs (rsync 3.4.0 or later;
+macOS may ship openrsync), and what the flags let through:
+
+#+begin_src sh
+rsync --version | head -n 1
+s=$(mktemp -d); d=$(mktemp -d)
+mkdir -p "$s/a/.git" "$s/b"; touch "$s/.envrc" "$s/a/.git/config" "$s/b/x.py"
+ln -s /etc/passwd "$s/b/link"
+rsync -r --no-links --exclude '.*' "$s/" "$d/"; (cd "$d" && find . | sort)
+#+end_src
+
+#+RESULTS:
+: openrsync: protocol version 29
+: skipping non-regular file "b/link"
+: .
+: ./a
+: ./b
+: ./b/x.py
+
+Expected: =.=, =./a=, =./b= and =./b/x.py= only. Decide here whether
+files Claude deletes should go too (=--delete=, not
+=--delete-excluded=).
+
+*** Done when
+
+- [ ] =--ssh HOST= always passes the forwarding options from the spec,
+  plus the =ControlPath= rule if the spike asks for one. The pull's
+  =rsync -e= uses the same ssh command.
+- [ ] The README sets up a =feed= user that owns the feed dir; Claude's
+  user can read it and not write it. The remote script refuses when
+  =TO=, =TO/outputs= or the target is a symlink (tested by planting
+  one).
+- [ ] A result costs one ssh command, with output before event. The
+  heartbeat is its own =put=.
+- [ ] =devops-bb-sandbox-pull= runs on a timer while attached, and
+  right before each confirm. Symlinks and dotfiles never arrive.
+- [ ] End to end on the node: attach, run blocks, and =follow= /
+  =run-output= on the node see them. Claude's edits are pulled and
+  prompt with the diff.
+- [ ] The rsync version check and the two node checks are in the
+  README, as the steps for setting up a node. macOS's openrsync is
+  named as acceptable.
+- [ ] =--ssh= quotes the remote script itself; =--via "ssh …"= is
+  refused or documented as unsupported.
+
 

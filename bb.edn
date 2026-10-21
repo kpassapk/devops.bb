@@ -31,6 +31,21 @@
   publish    {:doc "--to DIR [--via CMD] [--map HOST=SANDBOX] [--max-lines N] [--max-bytes N] [--name N]: stdin to a sandbox's feed"
               :exec-fn devops.bb.cli/publish}
 
+  repo-clone   {:doc "[--heading H]: clone the seed bundle in the workbook's dir, on the heading's branch"
+                :exec-fn devops.bb.repo/repo-clone}
+  repo-handoff {:doc "[--heading H]: bundle every branch with new commits into the workbook's dir"
+                :exec-fn devops.bb.repo/repo-handoff}
+  repo-rebase  {:doc "[--heading H] [--continue]: rebase the branch onto its base's new tip, from NAME.base.bundle"
+                :exec-fn devops.bb.repo/repo-rebase}
+  wt-add       {:doc "--workbook F --heading H: the heading's worktree, with the live workbook in it"
+                :exec-fn devops.bb.repo/wt-add}
+  wt-seed      {:doc "--workbook F --heading H [--rebase]: bundle the branches for the agent"
+                :exec-fn devops.bb.repo/wt-seed}
+  wt-land      {:doc "--workbook F --heading H [--apply]: fetch the agent's bundle into refs/sandbox/*"
+                :exec-fn devops.bb.repo/wt-land}
+  wt-status    {:doc "--workbook F: each heading's branch, worktree, seed and unlanded commits"
+                :exec-fn devops.bb.repo/wt-status}
+
   test-emacs
   {:doc "Run the Emacs side's ERT tests; DEVOPS_EL, CLJBANG and OB_CONFIRM_POSFRAME are its checkouts, default ../devops.el, ../cljbang.el and ../ob-confirm-posframe"
    :requires ([babashka.fs :as fs])
@@ -57,10 +72,14 @@
               [devops.bb.feed-test]
               [devops.bb.log-test]
               [devops.bb.model-test]
+              [devops.bb.org-test]
+              [devops.bb.repo-test]
               [devops.bb.view-test])
    :task (let [{:keys [fail error]} (t/run-tests 'devops.bb.cli-test
                                                  'devops.bb.feed-test
                                                  'devops.bb.log-test
                                                  'devops.bb.model-test
+                                                 'devops.bb.org-test
+                                                 'devops.bb.repo-test
                                                  'devops.bb.view-test)]
            (when (pos? (+ fail error)) (System/exit 1)))}}}
