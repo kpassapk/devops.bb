@@ -51,6 +51,11 @@ Bound by `devops-bb-log--during-async-filter', so that
 result a block inserts, and names the session without resolving the
 target.")
 
+     (defvar devops-bb-log--inserting nil
+       "Non-nil while `org-babel-insert-result' runs.
+The run, not the user, is changing the buffer, so
+`devops-bb-log--on-change' logs no `modify' for it.")
+
      (defvar devops-bb-log--subscribers nil
        "Functions `devops-bb-log-subscribe' added for every buffer, in order.")
 
@@ -200,7 +205,8 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
   (let [pos (el/point)
         session el/devops-bb-log--async-result
         id (when (and session (listening?)) (placeholder-id-at pos))
-        value (apply f args)]
+        value (el! (let ((devops-bb-log--inserting t))
+                     (apply (clj! f) (clj! args))))]
     (when session
       (el! (let ((devops-bb-log--async-result nil))
              (clj! (block! "result" pos session id)))))
@@ -253,7 +259,7 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
              (el/buffer-file-name (el/buffer-base-buffer)))
     (emit event)))
 
-(defn- on-change [] (edit! "modify"))
+(defn- on-change [] (when-not el/devops-bb-log--inserting (edit! "modify")))
 (defn- on-save [] (edit! "save"))
 (defn- on-revert [] (edit! "revert"))
 (defn- on-kill [] (when (el/buffer-modified-p) (edit! "kill")))

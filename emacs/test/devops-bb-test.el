@@ -985,7 +985,7 @@ Detach closes stdin and undoes the attach."
         (should (equal out `((session) (status . "done") (id . ,(alist-get 'id run))
                              (input . "(+ 1 2)") (output . "3"))))
         (should (equal (mapcar (lambda (l) (alist-get 'event l)) (cdr lines))
-                       '("modify" "save" "execute" "revert")))))))
+                       '("save" "execute" "revert")))))))
 
 (ert-deftest devops-bb-sandbox-attach-via-test ()
   "A :via sink passes its command, and its :to as is, to the publisher."
@@ -1286,8 +1286,8 @@ the run and `attached' false."
           (should (equal (alist-get 'feed status) "wb"))
           (should (equal (alist-get 'workbook status) file))
           (should (equal (mapcar (lambda (e) (alist-get 'event e)) events)
-                         '("modify" "save" "execute")))
-          (should (equal (mapcar (lambda (e) (alist-get 'seq e)) events) '(1 2 3)))
+                         '("save" "execute")))
+          (should (equal (mapcar (lambda (e) (alist-get 'seq e)) events) '(1 2)))
           (should (equal (alist-get 'output
                                     (car (devops-bb-test--json-lines
                                           (expand-file-name

@@ -204,7 +204,13 @@ or a check on auto-revert, would keep it current.
 
 Each run publishes =modify= 1 ms before =execute= (the first change
 since the save).  Claude read it as "you're editing /work/trial.org".
-It goes away with finding 1, or could be dropped when a run caused it.
+Finding 1's save did not remove it: each run is still the first change
+since the save.
+
+Fixed: =devops-bb-log--log-async-result= binds
+=devops-bb-log--inserting= around =org-babel-insert-result=, and
+=on-change= logs no =modify= while it is set.  A run's feed is now
+=save=, =execute=; an edit by the operator still logs =modify=.
 
 ** 6. The private backup dir is in the repo
 
