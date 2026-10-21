@@ -32,6 +32,9 @@
 ;; - devops-bb-review.el     the review of each run in an attached
 ;;                           workbook, shown by ob-confirm-posframe
 ;;
+;; And one fix to org: an async result no longer re-runs the block's
+;; :var dependencies (see `devops-bb--async-filter').
+;;
 ;; Setup:
 ;;
 ;;   (add-to-list 'load-path "~/src/github.com/kpassapk/devops.bb/emacs")
@@ -52,6 +55,30 @@
              (file-name-directory (or load-file-name buffer-file-name)))
 (cljbang-require 'devops.bb.log)
 (cljbang-require 'devops.bb.sandbox)
+
+;;; Async results
+
+(defvar devops-bb--in-async-filter nil
+  "Non-nil while `org-babel-comint-async-filter' inserts a result.")
+
+(defun devops-bb--async-filter (fn &rest args)
+  "Around `org-babel-comint-async-filter' (FN with ARGS).
+The filter reads the block's info only for its result params, but
+`org-babel-get-src-block-info' resolves every :var reference, and
+resolving one runs its block: once per result, three times for :file.
+Resolve none while the filter runs."
+  (let ((devops-bb--in-async-filter t))
+    (apply fn args)))
+
+(defun devops-bb--skip-ref-in-filter (fn ref)
+  "Around `org-babel-ref-resolve' (FN with REF): nil in the async filter."
+  (unless devops-bb--in-async-filter
+    (funcall fn ref)))
+
+(advice-add 'org-babel-comint-async-filter :around #'devops-bb--async-filter)
+;; Outside the review's (-95), which would confirm a reference first.
+(advice-add 'org-babel-ref-resolve :around #'devops-bb--skip-ref-in-filter
+            '((depth . -100)))
 
 (provide 'devops-bb)
 

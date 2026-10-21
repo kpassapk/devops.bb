@@ -584,6 +584,37 @@ The entry names the session from the target the run resolved."
             (let ((kill-buffer-query-functions nil))
               (kill-buffer buf))))))))
 
+(ert-deftest devops-bb-async-var-not-rerun-test ()
+  "An async result does not run the block's :var dependencies again."
+  (let ((devops-enable-session-async t))
+    (devops-bb-test--with-local-target target
+      (let ((session (car (devops-target-sessions target))))
+        (unwind-protect
+            (devops-bb-test--with-org
+                (format (concat "#+TARGET: %s (local)\n\n"
+                                "* Run\t\t:local:\n\n"
+                                "#+name: foo\n#+begin_src elisp\n"
+                                "(cl-incf devops-bb-test--runs)\n#+end_src\n\n"
+                                "#+begin_src sh :var foo=foo\necho hi\n#+end_src\n")
+                        target)
+              (defvar devops-bb-test--runs 0)
+              (setq devops-bb-test--runs 0)
+              (goto-char (point-min))
+              (re-search-forward "begin_src sh")
+              (let ((org-confirm-babel-evaluate nil))
+                (org-babel-execute-src-block)
+                (let ((deadline (+ (float-time) 30)))
+                  (while (and (< (float-time) deadline)
+                              (not (save-excursion
+                                     (re-search-forward "^: hi" nil t))))
+                    (accept-process-output nil 0.2))))
+              (should (save-excursion (goto-char (point-min))
+                                      (re-search-forward "^: hi" nil t)))
+              (should (= devops-bb-test--runs 1)))
+          (when-let* ((buf (get-buffer session)))
+            (let ((kill-buffer-query-functions nil))
+              (kill-buffer buf))))))))
+
 (ert-deftest devops-bb-log-async-output-uuid-test ()
   "A result is logged with its own run's ID, whatever its output prints.
 The second block prints the first run's ID, which is in the session."
