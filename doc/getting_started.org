@@ -1,0 +1,188 @@
+#+TARGET: project ..
+#+TARGET: trial ~/sandbox-trial
+#+TARGET: box   /podman:trial-box:
+
+* Intro
+
+In this guide, we will use a sandboxed agent to provide an assessment on the disk usage of your (local) machine. But wait - you say - this can't possibly work, because the agent can't see your local machine. It's in a Docker container. It can only see its local file system. How is it going to work?
+
+Here's how it's going to work:
+
+1. You (the "operator") will select a =.org= file to serve as your "workbook". This is a scratch file shared between you and the agent.
+2. You start a specially provisioned Docker container. Your project and the container share a [[file:../sandbox/Dockerfile::WORKDIR /work][/work]] direcotry and a =/feed=. The feed directory is the "sink".
+3. In Emacs, you /attach/ your workbook using =devops-bb-sandbox-attach=, and selecting the container you just launched as the sink.
+4. You launch Claude in the sandbox, and tell it to use the [[..//sandbox/skills/devops-bb-sandbox/SKILL.md][devops-bb-sandbox]] skill.
+5. You ask the agent a question. (Typey typey.)
+6. The agent will think about what data it needs from your machine. It writes a code block to get that info, in [[devops.el][https://github.com/kpassapk/devops.el]] syntax.
+7. You execute the code block.
+8. The agent gets notified via the =/feed=, and reads the command output. (From an async session pool provided by =devops.el=).
+9. The agent interprets the output and wirtes the result in your workbook.
+
+From your (the operator's) point of view, you are seeing text pop up in your workbook, executing code blocks, and reading the output. The agent is busy running commands in its sandbox and asking you for stuff.
+
+This example uses disk space; a more useful example might use the AWS or Github ClI, the =vercel= CLI, something like that.
+
+To summarize, here is what each party owns:
+
+Operator:
+- filesystem
+- CLIs  
+
+Agent:
+- workbook
+- coding: file read + write, tools like python, grep
+
+Both:
+- the workbook
+- the work/ directory containing your workbook
+    
+* Start reference Emacs                                             :project:
+
+If you have this repository checked out as =/src/github.com/kpassapk/devops.bb= (recommended), run
+
+#+begin_src sh
+emacs --init-directory=~/src/github.com/kpassapk/devops.bb/emacs/reference &
+#+end_src
+
+#+RESULTS:
+: [1] 94083
+
+Open this workbook int that Emacs.
+
+* Build image                                                       :project:
+
+Build the image
+
+#+begin_src sh :results silent
+podman build -f sandbox/Dockerfile -t devops-bb-sandbox .
+#+end_src
+
+#+begin_src sh
+podman images | grep sandbox
+#+end_src
+
+#+RESULTS:
+: localhost/devops-bb-sandbox                latest                 0f42dd3a3d33  12 minutes ago  1.46 GB
+
+* Create workbook
+
+#+begin_src sh :results silent
+  mkdir ~/sandbox-trial && cat > ~/sandbox-trial/trial.org <<'EOF'
+  ,#+TITLE: Sandbox trial
+  ,#+PROPERTY: header-args:sh :results output
+  ,#+TARGET: /tmp (host)
+
+  ,This is a trial for devops.el (~/src/github.com/kpassapk/devops.bb)
+
+  ,See doc/getting_started.org
+  EOF
+#+end_src
+
+* Set up Emacs:
+
+#+begin_src elisp
+  (global-auto-revert-mode 1)
+
+  (setq devops-bb-sandbox-sinks
+      '(("trial" :via "podman exec -i -u root trial-box" :to "/feed"
+         :map (("/Users/kyle/sandbox-trial" . "/work")))))
+#+end_src
+
+#+RESULTS:
+| trial | :via | podman exec -i -u root trial-box | :to | /feed | :map | ((/Users/kyle/sandbox-trial . /work)) |
+
+#+begin_src elisp
+(setq devops-bb-sandbox-sinks
+      '(("trial" :via "podman exec -i -u root trial-box" :to "/feed"
+         :map (("/Users/kyle/sandbox-trial" . "/work")))))
+#+end_src
+
+#+RESULTS:
+| trial | :via | podman exec -i -u root trial-box | :to | /feed | :map | ((/Users/kyle/sandbox-trial . /work)) |
+
+* Sandbox                                                             :trial:
+
+** Start sandbox
+
+Start the sandbox. Pass your API key, or log in at step 5:
+
+#+name: api-key
+#+begin_src sh :results silent
+  op item get "aly-2610-claude-devops-bb" --fields label=password --reveal
+#+end_src
+
+#+begin_src sh :var key=api-key
+  podman run -d --name trial-box -e ANTHROPIC_API_KEY=$key \
+    -v $(pwd):/work:rw localhost/devops-bb-sandbox
+#+end_src
+
+#+RESULTS:
+: 927dc19eb272a45c04bb13f32f19121c5e8f4d07cb9672080634bf4a7c2471c6
+
+** Attach                                                            :trial:
+
+Open =~/sandbox-trial/trial.org=,
+
+#+begin_src elisp :results none
+  (find-file "trial.org")
+#+end_src
+
+run =M-x devops-bb-sandbox-attach=, pick trial, and keep
+the default feed name. The mode line should say sandbox: trial.
+
+** Start Claude
+
+Put the cursor on the block below and run =devops-open-terminal-dwim=.
+This will open Ghostty to the right 
+
+#+begin_src sh
+   podman exec -it trial-box claude
+#+end_src
+
+#+RESULTS:
+: /Users/kyle/sandbox-trial
+
+Prompt: 
+#+begin_example
+  Use the devops-bb-sandbox skill. I want a summary of which of my host's filesystems are over
+  50% full. Get df -h from the host through a block in /work/trial.org, then write/work/summary.py that parses that output, and test the script yourself.
+#+end_example
+
+6. What to look for:
+- Claude runs devops-bb status, starts follow, and checks modified before writing the workbook.
+- Your buffer reloads with Claude's block in it.
+- Running the block shows the posframe with the notice "not run since attach", and d opens the diff.
+- Claude sees the run, reads it with run-output, writes and tests summary.py itself, and asks for no block to do that.
+- If Claude adds a block that runs the script on the host, the prompt shows "files changed … summary.py (new)", and d shows the file's diff.
+- Re-running an unchanged block runs it without a prompt.
+
+7. Try to break it. Run these from a second terminal into the container: docker exec trial-box sh -c '…'
+- touch /work/.envrc → the mode line says sandbox: SUSPENDED and runs are refused. rm /work/.envrc and it resumes.
+- ln -s /etc /work/etc → suspended as well. Remove it.
+- Append a block with :var x=(shell-command "touch /tmp/pwned") to trial.org. Running it should be refused with "elisp in header", and /tmp/pwned should not exist on your host.
+- Edit a block you already ran, then run it → it prompts with "changed since you ran it: +n/-m".
+
+8. Detaching and quitting:
+- M-x devops-bb-sandbox-detach, then docker exec trial-box devops-bb status → "attached":false. Claude's follow should print a "detached" notice.
+- Attach again, then quit Emacs → status should again show "attached":false. This is the interactive-quit check from PR 7.
+
+9. Clean up: docker rm -f trial-box and rm -rf ~/sandbox-trial.
+
+Tell me anything that behaves differently from steps 6–8, especially:
+- the posframe layout;
+- a notice that's missing or cut off;
+- Emacs freezing at any point;
+- Claude reaching for something it can't have.
+
+* Stop
+
+#+begin_src sh
+podman ps | grep trial
+#+end_src
+
+#+RESULTS:
+: 927dc19eb272  localhost/devops-bb-sandbox:latest    sleep infinity  45 seconds ago  Up 45 seconds                                                                trial-box
+
+#+begin_src sh
+podman stop trial-box
+#+end_src

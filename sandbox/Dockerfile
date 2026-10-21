@@ -43,7 +43,8 @@ ENV DEVOPS_BB_FEED=/feed
 WORKDIR /work
 
 # Resolve bb.edn's git dep now, so the running sandbox needs no
-# egress for it. bb 1.13 clones with git; no Java.
+# egress for it. bb 1.13 resolves deps; no Java.
 RUN devops-bb tasks >/dev/null
 
+# Aaah
 CMD ["sleep", "infinity"]

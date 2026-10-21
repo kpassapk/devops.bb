@@ -28,10 +28,13 @@ During regular coding, this could be an AWS or Cloudflare command,
 running an infrastructure runbook, downloading data from a shared
 development system, looking at logs, doing discovery on an already
 running system or API, or a third party API; or getting something from
-the company's ERP.
+the company's ERP. You would run these commands from a remote development
+=#+TARGET= machine. Tailscale ACLs gate access.
 
 During an incident, this could be running a command in a production
-server to determine system status or find root cause.
+server to determine system status or find root cause. You would run
+these commands in an ops-specific target machine, or via a bastion
+host. (Again secured with Tailscale.)
 
 Copying and pasting commands and results is a terrible workflow,
 especially in demanding situations like an incident, when we may be

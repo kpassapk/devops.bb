@@ -1,154 +1,53 @@
 # devops.bb
 
-devops.el from the command line, in [babashka](https://babashka.org),
-and a way to work with an agent that holds no credentials.
+Agentic loop with Emacs [devops.el][devops-el] and [babashka][babashka].
 
-[devops.el](https://github.com/kpassapk/devops.el) runs org-babel blocks
-on remote targets. devops.bb's Emacs side logs each run, and its
-commands read that log and ask the Emacs that wrote it what each run
-printed:
+[devops-el]: https://github.com/kpassapk/devops.el
+[babashka]: https://babashka.org
 
-- `devops-bb dashboard`, a TUI that follows the log
-- `devops-bb output`, `follow`, `sessions`, … commands that print JSON
-- **sandboxes**: an agent in a container writes blocks into a workbook,
-  you review and run them in Emacs, and it reads each run from a
-  one-way *feed*. It never touches a server, a cloud account or your
-  Emacs itself.
+## Why?
 
-## Install
+In your daily work as a developer, you are likely to interact with
+servers and systems containing sensitive data. You likely have
+elevated access scope via CLIs, ssh into servers, etc. If you run 
+coding agents on your local machine, the agents have the same elevated
+access scope!
 
-Requires:
+Best practices for security dictate that agents should be running in a
+sandbox, where they cannot access the user's file system or other
+credentialed services. "Sandboxes" and other controls built into agent
+harnesses are fragile, and the agent can overcome them easily. (I
+think.)
 
-- babashka 1.13.226 or later.
-- Emacs with an `emacsclient` server, devops.el with `devops-mode` on,
-  and [cljbang](https://github.com/borkdude/cljbang.el), with this
-  repository's Emacs side loaded (below).
-- For sandboxes, [ob-confirm-posframe](https://github.com/kpassapk/ob-confirm-posframe)
-  with `ob-confirm-posframe-mode` on, and Docker.
-- Optionally [cljbang-org](https://github.com/kpassapk/cljbang-org) in
-  that Emacs, for the dashboard to show a block's heading and source.
+The best sandbox is at the operating system level: running agents in a
+separate machine or container.  Here, the agent writes files, runs
+local tools (grep, jq, etc.); compiles and runs code.
 
-Link the command onto PATH. It finds `bb.edn` through the link, so it
-runs from any directory:
+Yet some of the most powerful use cases for agents involve real-world
+information systems, provider APIs, and deployed apps. These systems
+are "situated".
 
-```
-ln -s ~/src/github.com/kpassapk/devops.bb/bin/devops-bb ~/.local/bin/
-devops-bb status
-```
+When the agent needs something from the outside world, it should ask
+the user to run a command. This could be during regular coding or an
+incident.
 
-Load the Emacs side, and turn on the log:
+During regular coding, this could be an AWS or Cloudflare command,
+running an infrastructure runbook, downloading data from a shared
+development system, looking at logs, doing discovery on an already
+running system or API, or a third party API; or getting something from
+the company's ERP.
 
-```emacs-lisp
-(add-to-list 'load-path "~/src/github.com/kpassapk/devops.bb/emacs")
-(require 'devops-bb)
-(setq devops-bb-execution-log "~/.cache/devops/executions.jsonl")
-(devops-bb-log-mode 1)
-```
+During an incident, this could be running a command in a production
+server to determine system status or find root cause.
 
-With use-package, the mode goes under `:config`; `:custom` would set
-the variable without turning the mode on. Don't use `:ensure`: the
-package is not in an archive.
+Copying and pasting commands and results is a terrible workflow,
+especially in demanding situations like an incident, when we may be
+running dozens of code blocks in quick succession.
 
-| File                            | Does                                                          |
-|---------------------------------|---------------------------------------------------------------|
-| `emacs/devops-bb.el`            | loads the ones below                                          |
-| `emacs/devops-bb-scripting.el`  | noninteractive functions the commands call over `emacsclient` |
-| `emacs/devops/bb/log.clj`       | `devops-bb-log-mode`, in cljbang: emits each event to the log and to subscribers |
-| `emacs/devops/bb/sandbox.clj`   | `devops-bb-sandbox-attach`, in cljbang: feeds one workbook's runs to a sandbox |
-| `emacs/devops-bb-review.el`     | the review of every run in an attached workbook              |
+This repository provides an interactive loop for executing things on
+servers. 
 
-`devops-bb-log-mode` writes a line when a block runs, when an async
-block's result arrives, when `devops-tangle` or `devops-drift` runs, and
-when an org buffer is first modified, saved, reverted, or killed with
-unsaved edits. The log holds no output.
-
-## Dashboard
-
-```
-devops-bb dashboard
-```
-
-```
- devops.bb · ~/.cache/devops/executions.jsonl · emacs ●                11:23:05
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 11:23:00  ▶ execute  db.org:77            db-1 /ssh:db-1:              running…
- 11:22:10  ✗ tangle   db.org:12            No target on this h…            error
- 11:21:47  ≠ drift    infra.org            all headings          1 drift, 1 same
- 11:20:02  ⇣ tangle   infra.org:100        nginx                         2 files
- 11:17:50  ✓ result   infra.org:118        web-1 /ssh:web-1:                3.4s
- 11:17:47  ▶ execute  infra.org:118        web-1 /ssh:web-1:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ▶1 running ✓1 done ⇣2 tangled =1 drift ✗2 problems     ⏎ open  e emacs  q quit
-```
-
-Newest first. With the cursor at the top, the feed follows new lines;
-further down, it stays on the event it is on.
-
-The log path comes from `devops-bb-execution-log` in Emacs. Without Emacs,
-pass it: `devops-bb dashboard --log ~/.cache/devops/executions.jsonl`.
-The list works from the log alone; opening a block run needs Emacs. In a
-sandbox (`DEVOPS_BB_FEED` set) it follows the feed instead.
-
-⏎ opens the selected event. A block run is answered by Emacs, and
-nothing runs:
-
-- **output**: `devops-bb-scripting-run-output`, by the run's session and
-  id, so it is that run's output even after the block ran again. If
-  the session no longer holds the run, the block's latest run or its
-  `#+RESULTS` is shown, and the view says so.
-- **source**: the block now at the logged line, from
-  `cljbang-org-src-blocks`, if its code is what the run sent. If the
-  file has changed, the view shows what was sent instead.
-
-A tangle or drift check is shown from its log line: the targets and how
-many files, or each file's drift status.
-
-| Key                   | Feed                   | Detail                 |
-|-----------------------|------------------------|------------------------|
-| `j` `k` `↑` `↓`       | move                   | scroll                 |
-| `space` `PgDn` `PgUp` | page                   | page                   |
-| `g` `G`               | newest, oldest         | top                    |
-| `⏎` `l` `→`           | open                   |                        |
-| `h` `←` `esc`         |                        | back                   |
-| `r`                   |                        | ask Emacs again        |
-| `e`                   | show the line in Emacs | show the line in Emacs |
-| `q` `C-c`             | quit                   | quit                   |
-
-## Commands
-
-Each command asks Emacs one question and prints the answer as one line
-of JSON. An error goes to stderr as `error: ...`, with exit status 1.
-FILE may be relative to the current directory.
-
-| Command | Answers |
-|---|---|
-| `devops-bb status` | whether `devops-mode` is on, and where it logs |
-| `devops-bb output FILE LINE [--tag T]` | what a block printed: session, else `#+RESULTS` |
-| `devops-bb run-output ID [--session S]` | what one run printed, from its session |
-| `devops-bb sessions` | the live async sessions |
-| `devops-bb follow [--dir D] [--json]` | a line per new log event under D, until stopped |
-| `devops-bb modified FILE` | whether Emacs holds unsaved edits to FILE |
-| `devops-bb revert FILE` | reload FILE's buffer from disk |
-| `devops-bb tools [REGEXP]` | the `tools.org` blocks loaded for `#+call:` |
-| `devops-bb drift FILE [--heading H \| --custom-id ID]` | tangles compared with targets |
-| `devops-bb publish --to DIR …` | stdin to a sandbox's feed (Emacs starts it; see below) |
-
-```
-$ devops-bb follow --dir ~/ops
-execute running /home/me/ops/web.org:12 089d9332-bcff-4ae3-9916-d891ec394804
-result done /home/me/ops/web.org:12 089d9332-bcff-4ae3-9916-d891ec394804
-
-$ devops-bb run-output 089d9332-bcff-4ae3-9916-d891ec394804 | jq -r .output
-```
-
-Only `drift` does more than read: it reads every target over TRAMP, and
-expanding `<<name()>>` references runs those blocks.
-
-## Sandboxes
-
-An agent that can run your CLIs can use your credentials. So the agent
-runs in a sandbox with none, and the one way to a server is a block you
-run:
+## Agentic loop
 
 ```
  servers, cloud accounts, git push
@@ -166,6 +65,10 @@ run:
                                               no route to the host or
                                               the servers
 ```
+
+An agent that can run your CLIs can use your credentials. So the agent
+runs in a sandbox with none, and the one way to a server is a block you
+run:
 
 - **The workbook** lives in its own directory, mounted read-write at
   `/work`. The agent writes blocks into it, and scripts beside it.
@@ -308,6 +211,169 @@ changes the dir, so the push block prompts again.
   where else it can connect.
 - Not yet: the `--ssh` sink and pulling a remote workbook, for an agent
   on a Tailscale node.
+
+
+
+[devops.el](https://github.com/kpassapk/devops.el) runs org-babel blocks
+on remote targets. devops.bb's Emacs side logs each run, and its
+commands read that log and ask the Emacs that wrote it what each run
+printed:
+
+- `devops-bb dashboard`, a TUI that follows the log
+- `devops-bb output`, `follow`, `sessions`, … commands that print JSON
+- **sandboxes**: an agent in a container writes blocks into a workbook,
+  you review and run them in Emacs, and it reads each run from a
+  one-way *feed*. It never touches a server, a cloud account or your
+  Emacs itself.
+
+## Install
+
+Requires:
+
+- babashka 1.13.226 or later.
+- Emacs with an `emacsclient` server, devops.el with `devops-mode` on,
+  and [cljbang](https://github.com/borkdude/cljbang.el), with this
+  repository's Emacs side loaded (below).
+- For sandboxes, [ob-confirm-posframe](https://github.com/kpassapk/ob-confirm-posframe)
+  with `ob-confirm-posframe-mode` on, and Docker.
+- Optionally [cljbang-org](https://github.com/kpassapk/cljbang-org) in
+  that Emacs, for the dashboard to show a block's heading and source.
+
+Link the command onto PATH. It finds `bb.edn` through the link, so it
+runs from any directory:
+
+```
+ln -s ~/src/github.com/kpassapk/devops.bb/bin/devops-bb ~/.local/bin/
+devops-bb status
+```
+
+Load the Emacs side, and turn on the log:
+
+```emacs-lisp
+(add-to-list 'load-path "~/src/github.com/kpassapk/devops.bb/emacs")
+(require 'devops-bb)
+(setq devops-bb-execution-log "~/.cache/devops/executions.jsonl")
+(devops-bb-log-mode 1)
+```
+
+With use-package, the mode goes under `:config`; `:custom` would set
+the variable without turning the mode on. Don't use `:ensure`: the
+package is not in an archive.
+
+[`emacs/reference/`](emacs/reference/) is a whole Emacs config:
+[Emacs Bedrock](https://codeberg.org/ashton314/emacs-bedrock) (main,
+18ca33a; MIT, see `LICENSE.bedrock`), unchanged but for two extras that
+its `init.el` loads:
+
+- [`extras/devops-bb.el`](emacs/reference/extras/devops-bb.el):
+  devops.el, ob-confirm-posframe, cljbang, this repository's Emacs side
+  and the server. Copy it into your own Bedrock config, setting
+  `ref-devops-bb-dir` to your checkout.
+- [`extras/macos.el`](emacs/reference/extras/macos.el): the shell's
+  `PATH` in GUI Emacs, and [Calle 24](https://github.com/kickingvegas/calle24)'s
+  SF Symbols tool bar icons. Run `M-x calle24-install` once and restart.
+
+It needs Emacs 31 or later. Try it beside your own config; the path
+must be absolute:
+
+```
+emacs --init-directory=~/src/github.com/kpassapk/devops.bb/emacs/reference
+```
+
+| File                            | Does                                                          |
+|---------------------------------|---------------------------------------------------------------|
+| `emacs/devops-bb.el`            | loads the ones below                                          |
+| `emacs/devops-bb-scripting.el`  | noninteractive functions the commands call over `emacsclient` |
+| `emacs/devops/bb/log.clj`       | `devops-bb-log-mode`, in cljbang: emits each event to the log and to subscribers |
+| `emacs/devops/bb/sandbox.clj`   | `devops-bb-sandbox-attach`, in cljbang: feeds one workbook's runs to a sandbox |
+| `emacs/devops-bb-review.el`     | the review of every run in an attached workbook              |
+
+`devops-bb-log-mode` writes a line when a block runs, when an async
+block's result arrives, when `devops-tangle` or `devops-drift` runs, and
+when an org buffer is first modified, saved, reverted, or killed with
+unsaved edits. The log holds no output.
+
+## Dashboard
+
+```
+devops-bb dashboard
+```
+
+```
+ devops.bb · ~/.cache/devops/executions.jsonl · emacs ●                11:23:05
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 11:23:00  ▶ execute  db.org:77            db-1 /ssh:db-1:              running…
+ 11:22:10  ✗ tangle   db.org:12            No target on this h…            error
+ 11:21:47  ≠ drift    infra.org            all headings          1 drift, 1 same
+ 11:20:02  ⇣ tangle   infra.org:100        nginx                         2 files
+ 11:17:50  ✓ result   infra.org:118        web-1 /ssh:web-1:                3.4s
+ 11:17:47  ▶ execute  infra.org:118        web-1 /ssh:web-1:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ▶1 running ✓1 done ⇣2 tangled =1 drift ✗2 problems     ⏎ open  e emacs  q quit
+```
+
+Newest first. With the cursor at the top, the feed follows new lines;
+further down, it stays on the event it is on.
+
+The log path comes from `devops-bb-execution-log` in Emacs. Without Emacs,
+pass it: `devops-bb dashboard --log ~/.cache/devops/executions.jsonl`.
+The list works from the log alone; opening a block run needs Emacs. In a
+sandbox (`DEVOPS_BB_FEED` set) it follows the feed instead.
+
+⏎ opens the selected event. A block run is answered by Emacs, and
+nothing runs:
+
+- **output**: `devops-bb-scripting-run-output`, by the run's session and
+  id, so it is that run's output even after the block ran again. If
+  the session no longer holds the run, the block's latest run or its
+  `#+RESULTS` is shown, and the view says so.
+- **source**: the block now at the logged line, from
+  `cljbang-org-src-blocks`, if its code is what the run sent. If the
+  file has changed, the view shows what was sent instead.
+
+A tangle or drift check is shown from its log line: the targets and how
+many files, or each file's drift status.
+
+| Key                   | Feed                   | Detail                 |
+|-----------------------|------------------------|------------------------|
+| `j` `k` `↑` `↓`       | move                   | scroll                 |
+| `space` `PgDn` `PgUp` | page                   | page                   |
+| `g` `G`               | newest, oldest         | top                    |
+| `⏎` `l` `→`           | open                   |                        |
+| `h` `←` `esc`         |                        | back                   |
+| `r`                   |                        | ask Emacs again        |
+| `e`                   | show the line in Emacs | show the line in Emacs |
+| `q` `C-c`             | quit                   | quit                   |
+
+## Commands
+
+Each command asks Emacs one question and prints the answer as one line
+of JSON. An error goes to stderr as `error: ...`, with exit status 1.
+FILE may be relative to the current directory.
+
+| Command | Answers |
+|---|---|
+| `devops-bb status` | whether `devops-mode` is on, and where it logs |
+| `devops-bb output FILE LINE [--tag T]` | what a block printed: session, else `#+RESULTS` |
+| `devops-bb run-output ID [--session S]` | what one run printed, from its session |
+| `devops-bb sessions` | the live async sessions |
+| `devops-bb follow [--dir D] [--json]` | a line per new log event under D, until stopped |
+| `devops-bb modified FILE` | whether Emacs holds unsaved edits to FILE |
+| `devops-bb revert FILE` | reload FILE's buffer from disk |
+| `devops-bb tools [REGEXP]` | the `tools.org` blocks loaded for `#+call:` |
+| `devops-bb drift FILE [--heading H \| --custom-id ID]` | tangles compared with targets |
+| `devops-bb publish --to DIR …` | stdin to a sandbox's feed (Emacs starts it; see below) |
+
+```
+$ devops-bb follow --dir ~/ops
+execute running /home/me/ops/web.org:12 089d9332-bcff-4ae3-9916-d891ec394804
+result done /home/me/ops/web.org:12 089d9332-bcff-4ae3-9916-d891ec394804
+
+$ devops-bb run-output 089d9332-bcff-4ae3-9916-d891ec394804 | jq -r .output
+```
+
+Only `drift` does more than read: it reads every target over TRAMP, and
+expanding `<<name()>>` references runs those blocks.
 
 ## Agent skills
 
