@@ -1,7 +1,7 @@
-#+TARGET: project    ..
-#+TARGET: atomstream ~/src/github.com/kpassapk/atomstream
-#+TARGET: notes      ~/src/github.com/kpassapk/atomstream-architecture-notes
-#+TARGET: links      ~/src/github.com/kpassapk/atomstream-readme-links
+#+TARGET: project ..
+#+TARGET: todos   ~/src/github.com/kpassapk/bb-todo-api
+#+TARGET: core    ~/src/github.com/kpassapk/bb-todo-api-core
+#+TARGET: api     ~/src/github.com/kpassapk/bb-todo-api-api
 #+PROPERTY: header-args:sh :results output
 
 * Intro
@@ -10,26 +10,31 @@ In [[file:getting_started.org][getting_started.org]] the agent only read your ma
 code, in two pieces of work that depend on each other, and you decide
 whether any commit ever leaves your machine.
 
-The repository is [[https://github.com/kpassapk/atomstream][atomstream]], a public Clojure repo, so you can follow
-along without credentials. The workbook lives /in/ the repo, in =work/=,
-and each piece of work is a heading in it:
+The repository is [[https://github.com/kpassapk/bb-todo-api][bb-todo-api]], a small todo service in Babashka. It is
+built in two parts, and the second needs the first:
+
+- =todos.core=: the model, pure functions over a store.
+- =todos.api=: a Ring handler over the model.
+
+The workbook lives /in/ the repo, in =work/=, and each part is a heading
+in it:
 
 #+begin_example
-* TODO Architecture notes     :BRANCH: architecture-notes   :BASE: main
-* TODO README links           :BRANCH: readme-links         :BASE: architecture-notes
+* TODO Core: completing todos   :BRANCH: core   :BASE: main
+* TODO API                      :BRANCH: api    :BASE: core
 #+end_example
 
 Each heading gets its own git worktree, its own container and its own
-attach. The second is cut from the first, so its PR is /stacked/ on the
-first's. (A heading with =:BASE: main= is an ordinary, independent PR;
-nothing here needs a stack.) The agent never sees your checkout, your
-worktrees or your =.git= (hooks and config in it run code). The repo
-travels as a /bundle/, a single file of git objects and refs, through
-the workbook's directory:
+attach. The API is cut from core, so its PR is /stacked/ on core's. (A
+heading with =:BASE: main= is an ordinary, independent PR; nothing here
+needs a stack.) The agent never sees your checkout, your worktrees or
+your =.git= (hooks and config in it run code). The repo travels as a
+/bundle/, a single file of git objects and refs, through the workbook's
+directory:
 
-1. You seed =atomstream.bundle= into the worktree's =work/=.
-2. The agent clones it into its own copy in the container, edits and
-   commits there, and bundles its new commits back.
+1. You seed =bb-todo-api.bundle= into the worktree's =work/=.
+2. The agent clones it into its own copy in the container, edits, tests
+   and commits there, and bundles its new commits back.
 3. You fetch that into =refs/sandbox/*=, read the commits, and only
    then move your branch.
 4. You push. It is the one step that needs a credential, so it is a
@@ -43,7 +48,8 @@ Operator:
 - your checkout, the worktrees, seeding, landing, the push
 
 Agent:
-- its clone in the container: edits, tests, commits, the outgoing bundle
+- its clone in the container: edits, =bb test=, commits, the outgoing
+  bundle
 
 Both:
 - the workbook, and the bundle files beside it
@@ -65,61 +71,74 @@ Do the build, Emacs and sandbox-sink steps of
 =ob-confirm-posframe-mode=). Rebuild the image if it is older than this
 guide: it has the =repo-*= tasks and the skill.
 
-Check out atomstream, and keep its workbooks out of git without touching
-its =.gitignore=:
+Check out bb-todo-api, and keep its workbooks out of git without
+touching its =.gitignore=:
 
 #+begin_src sh :dir ~/src/github.com/kpassapk
-git clone git@github.com:kpassapk/atomstream.git
-echo 'work/' >> atomstream/.git/info/exclude
-mkdir -p atomstream/work
+git clone git@github.com:kpassapk/bb-todo-api.git
+echo 'work/' >> bb-todo-api/.git/info/exclude
+mkdir -p bb-todo-api/work
+#+end_src
+
+Look at what is there: a model with =add= and =all=, one test, and
+=bb test=:
+
+#+begin_src sh :dir ~/src/github.com/kpassapk/bb-todo-api
+cat src/todos/core.clj
+bb test
 #+end_src
 
 Create the workbook. Only headings with a =:BRANCH:= are tasks, and what
 the agent is told is the text under them:
 
-#+begin_src sh :dir ~/src/github.com/kpassapk/atomstream
-cat > work/atomstream.org <<'EOF'
-#+TITLE: atomstream
+#+begin_src sh :dir ~/src/github.com/kpassapk/bb-todo-api
+cat > work/todos.org <<'EOF'
+#+TITLE: bb-todo-api
 #+PROPERTY: header-args:sh :results output
 
-* TODO Architecture notes
+* TODO Core: completing todos
 :PROPERTIES:
-:BRANCH: architecture-notes
+:BRANCH: core
 :BASE:   main
 :END:
 
-Add doc/architecture.md: one page saying what each namespace file
-directly under src/atomstream is for (the .clj files in that directory,
-not its subdirectories yet). Commit it.
+Add =complete= to todos.core: it marks a todo done. Add a test, run
+=bb test=, and commit.
 
-* TODO README links
+* TODO API
 :PROPERTIES:
-:BRANCH: readme-links
-:BASE:   architecture-notes
+:BRANCH: api
+:BASE:   core
 :END:
 
-In README.md, add a section "Architecture" that links doc/architecture.md
-and names every namespace under src/atomstream, subdirectories included,
-each with a one-line purpose from doc/architecture.md. If
-doc/architecture.md misses one, fix it there: that is the base's change,
-not this branch's.
+Add src/todos/api.clj: a Ring handler, =(handler store-atom)=, which
+keeps the store in an atom and speaks JSON (cheshire):
+
+- GET /todos lists the todos.
+- POST /todos with {"title": ...} adds one and answers 201 with it.
+- POST /todos/:id/complete answers the updated todo, and 404 with
+  {"error": ...} for an id that does not exist.
+
+Test it by calling the handler with request maps, and run =bb test=. Add
+a =bb serve= task (http-kit, port 8080) and start it once to check it.
+If the model cannot do what the API needs, fix it in core: that is the
+base's change, not this branch's.
 EOF
 #+end_src
 
-Both tasks are docs, on purpose: the image has no JVM, so the agent can
-read the code but not run it. The first is also incomplete on purpose:
-the second finds out.
+The first heading does not say what =complete= does for an id that does
+not exist, on purpose: the second finds out.
 
-* Worktrees and containers                                     :atomstream:
+* Worktrees and containers                                           :todos:
 
 One worktree per heading, a sibling of the checkout, with the live
 workbook copied in. The second branch is cut from the first, which now
 exists.
 
 #+begin_src sh
-devops-bb wt-add --workbook work/atomstream.org --heading "Architecture notes"
-devops-bb wt-add --workbook work/atomstream.org --heading "README links"
-devops-bb wt-status --workbook work/atomstream.org
+devops-bb wt-add --workbook work/todos.org --heading "Core: completing todos"
+devops-bb wt-add --workbook work/todos.org --heading "API"
+devops-bb wt-status --workbook work/todos.org
 #+end_src
 
 Expected: two paths, then a row per heading with =0 commits=, =seed none=
@@ -128,10 +147,9 @@ and its worktree.
 Start a container on each worktree's =work/=, as in getting_started (the
 same =-e ANTHROPIC_API_KEY=, or log in):
 
-#+begin_src sh :results silent
-cd ~/src/github.com/kpassapk
-podman run -d --name box-notes -v $PWD/atomstream-architecture-notes/work:/work:rw localhost/devops-bb-sandbox
-podman run -d --name box-links -v $PWD/atomstream-readme-links/work:/work:rw localhost/devops-bb-sandbox
+#+begin_src sh :results silent :dir ~/src/github.com/kpassapk
+podman run -d --name box-core -v $PWD/bb-todo-api-core/work:/work:rw localhost/devops-bb-sandbox
+podman run -d --name box-api  -v $PWD/bb-todo-api-api/work:/work:rw localhost/devops-bb-sandbox
 #+end_src
 
 Add the sinks, then attach each worktree's workbook in Emacs, from its
@@ -139,215 +157,212 @@ own buffer with =M-x devops-bb-sandbox-attach=:
 
 #+begin_src elisp
 (setq devops-bb-sandbox-sinks
-      '(("notes" :via "podman exec -i -u root box-notes" :to "/feed"
-         :map (("/Users/kyle/src/github.com/kpassapk/atomstream-architecture-notes/work" . "/work")))
-        ("links" :via "podman exec -i -u root box-links" :to "/feed"
-         :map (("/Users/kyle/src/github.com/kpassapk/atomstream-readme-links/work" . "/work")))))
+      '(("core" :via "podman exec -i -u root box-core" :to "/feed"
+         :map (("/Users/kyle/src/github.com/kpassapk/bb-todo-api-core/work" . "/work")))
+        ("api" :via "podman exec -i -u root box-api" :to "/feed"
+         :map (("/Users/kyle/src/github.com/kpassapk/bb-todo-api-api/work" . "/work")))))
 #+end_src
 
 #+begin_src elisp :results none
-(find-file "~/src/github.com/kpassapk/atomstream-architecture-notes/work/atomstream.org")
+(find-file "~/src/github.com/kpassapk/bb-todo-api-core/work/todos.org")
 #+end_src
 
-The mode line should say =sandbox: notes=. Do the same in the other
-worktree with =links=. Two buffers, two feeds; neither holds the
-other's events.
+The mode line should say =sandbox: core=. Do the same in the other
+worktree with =api=. Two buffers, two feeds; neither holds the other's
+events.
 
-* First heading: Architecture notes                                  :notes:
+* First heading: Core                                                 :core:
 
 Seed the bundle, into this worktree's =work/=:
 
 #+begin_src sh
-devops-bb wt-seed --workbook work/atomstream.org --heading "Architecture notes"
+devops-bb wt-seed --workbook work/todos.org --heading "Core: completing todos"
 #+end_src
 
-Expected: =.../work/atomstream.bundle (base at <sha>)=. It is a regular
-file, which the workbook directory allows, and about 0.8 MB.
+Expected: =.../work/bb-todo-api.bundle (base at <sha>)=. It is a regular
+file, which the workbook directory allows.
 
-Open Claude in =box-notes= (=devops-open-terminal-dwim= on the line):
+Open Claude in =box-core= (=devops-open-terminal-dwim= on the line):
 
 #+begin_src sh
-podman exec -it box-notes claude
+podman exec -it box-core claude
 #+end_src
 
 Prompt:
 
 #+begin_example
-Use the devops-bb-sandbox skill. Do the heading "Architecture notes"
-in /work/atomstream.org.
+Use the devops-bb-sandbox skill. Do the heading "Core: completing
+todos" in /work/todos.org.
 #+end_example
 
 That is all. The task is the heading, and the how is the skill.
 
 What to look for:
-- Claude runs =devops-bb status=, then =repo-clone --heading "Architecture
-  notes"=, and reads the source in its own clone. It writes no block: all
-  of it is uncredentialed.
-- It runs git with =--no-pager=, commits =doc/architecture.md= and nothing
-  under =work/=, then runs =repo-handoff=. It says which branch the bundle
-  holds.
+- Claude runs =devops-bb status=, then =repo-clone --heading "Core:
+  completing todos"=, and reads the model in its own clone. It writes no
+  block: all of it is uncredentialed.
+- It runs =bb test= itself, with =git --no-pager=, and commits
+  =src/todos/core.clj= and its test, and nothing under =work/=. Then it
+  runs =repo-handoff= and says which branch the bundle holds.
 - It adds a =** Result= under its heading in the workbook, after checking
   =modified=. It does not try to push.
-- If it reaches for a REPL (atomstream's AGENTS.md mentions =clj-nrepl-eval=),
-  it says it has none instead of failing.
+- It does not use a REPL or =clj=: the image has Babashka only.
 
-* Land it                                                       :atomstream:
+* Land it                                                             :todos:
 
 Fetch and read, which moves nothing:
 
 #+begin_src sh
-devops-bb wt-land --workbook ~/src/github.com/kpassapk/atomstream-architecture-notes/work/atomstream.org --heading "Architecture notes"
+devops-bb wt-land --workbook ~/src/github.com/kpassapk/bb-todo-api-core/work/todos.org --heading "Core: completing todos"
 #+end_src
 
-Expected: === architecture-notes (new)= or =(ff)=, then the log with a stat
-showing only =doc/architecture.md=. =transfer.fsckObjects= checked every
-object, and nothing under =refs/heads= changed. The commits are the
-container's (author "Claude (sandbox)") and unsigned; a repo that
-requires signed commits needs a re-sign before the push.
+Expected: === core (ff)= (it is cut from =main=, and =core= exists in
+your checkout at the same commit), then the log with a stat showing the
+model and its test. =transfer.fsckObjects= checked every object, and
+nothing under =refs/heads= changed. The commits are the container's
+(author "Claude (sandbox)") and unsigned; a repo that requires signed
+commits needs a re-sign before the push.
 
-Read the file itself:
+Read the change itself:
 
-#+begin_src sh :dir ~/src/github.com/kpassapk/atomstream
-git --no-pager show refs/sandbox/architecture-notes:doc/architecture.md
+#+begin_src sh
+git --no-pager diff main refs/sandbox/core -- src
 #+end_src
 
 If you like it, move the branch (in its worktree, which has it checked
 out; =work/= keeps its edits):
 
 #+begin_src sh
-devops-bb wt-land --apply --workbook ~/src/github.com/kpassapk/atomstream-architecture-notes/work/atomstream.org --heading "Architecture notes"
-devops-bb wt-status --workbook work/atomstream.org
+devops-bb wt-land --apply --workbook ~/src/github.com/kpassapk/bb-todo-api-core/work/todos.org --heading "Core: completing todos"
+devops-bb wt-status --workbook work/todos.org
 #+end_src
 
-* Second heading: README links, and a fix to the first                :links:
+* Second heading: API, and a fix to core                               :api:
 
-The second heading is cut from the branch you just landed. Seed it from
-its own worktree:
+The API is cut from the branch you just landed. Seed it from its own
+worktree:
 
 #+begin_src sh
-devops-bb wt-seed --workbook work/atomstream.org --heading "README links"
+devops-bb wt-seed --workbook work/todos.org --heading "API"
 #+end_src
 
-Prompt, in =box-links=:
+Prompt, in =box-api=:
 
 #+begin_example
-Use the devops-bb-sandbox skill. Do the heading "README links" in
-/work/atomstream.org.
+Use the devops-bb-sandbox skill. Do the heading "API" in
+/work/todos.org.
 #+end_example
 
 What to look for:
-- =repo-clone= puts it on =readme-links=, cut from =architecture-notes=,
-  so it starts with the first heading's commit.
-- It finds that =doc/architecture.md= lacks the subdirectory namespaces,
-  as the task said it might. It fixes that on an =architecture-notes=
-  branch in its clone (=git switch -c architecture-notes
-  origin/architecture-notes=), rebases =readme-links= onto it, and writes
-  the README section.
+- =repo-clone= puts it on =api=, cut from =core=, so it starts with
+  core's =complete=.
+- It runs =bb test= and the handler tests itself, and checks =bb serve=
+  from inside the container (=curl localhost:8080=): uncredentialed.
+- Its 404 test shows =complete= cannot say "no such todo". It fixes that
+  on a =core= branch in its clone (=git switch -c core origin/core=),
+  rebases =api= onto it, and finishes the API.
 - =repo-handoff= lists /two/ branches. Its Result says which commits are
   for the base.
 
-Land both. The log shows the fix under =architecture-notes= and the
-README change under =readme-links=:
+Land both. The log shows the model fix under =core= and the handler
+under =api=:
 
 #+begin_src sh
-devops-bb wt-land --workbook ~/src/github.com/kpassapk/atomstream-readme-links/work/atomstream.org --heading "README links"
+devops-bb wt-land --workbook ~/src/github.com/kpassapk/bb-todo-api-api/work/todos.org --heading "API"
 #+end_src
 
 The base's commit is reviewed as the base's. Then =--apply=: both move
 fast-forward, each in its worktree.
 
-* The base moves, and the second heading follows                     :notes:
+* The base moves, and the API follows                                 :core:
 
-Review feedback on the first: make a change by hand, in its worktree, as
-you would in any checkout.
+Review feedback on core: make a change by hand, in its worktree, as you
+would in any checkout.
 
 #+begin_src sh
-cd ~/src/github.com/kpassapk/atomstream-architecture-notes
-printf '\n_Reviewed by hand._\n' >> doc/architecture.md
-git commit -qam "Reviewed by hand"
+printf '\nThe model is pure: see todos.core.\n' >> README.md
+git commit -qam "Note the model is pure"
 #+end_src
 
-=readme-links= is now behind its base. =wt-status= says so, as =seed
-stale=:
+=api= is now behind its base. =wt-status= says so, as =seed stale=:
 
-#+begin_src sh :dir ~/src/github.com/kpassapk/atomstream
-devops-bb wt-status --workbook work/atomstream.org
+#+begin_src sh :dir ~/src/github.com/kpassapk/bb-todo-api
+devops-bb wt-status --workbook work/todos.org
 #+end_src
 
-Send the new base tip over. Run it against the second worktree's
-workbook, so the bundle lands in the =work/= its container sees:
+Send the new base tip over. Run it against the API worktree's workbook,
+so the bundle lands in the =work/= its container sees:
 
-#+begin_src sh :dir ~/src/github.com/kpassapk/atomstream-readme-links
-devops-bb wt-seed --rebase --workbook work/atomstream.org --heading "README links"
+#+begin_src sh :dir ~/src/github.com/kpassapk/bb-todo-api-api
+devops-bb wt-seed --rebase --workbook work/todos.org --heading "API"
 #+end_src
 
-Tell Claude in =box-links=:
+Tell Claude in =box-api=:
 
 #+begin_example
-The base moved. /work/atomstream.base.bundle has its new tip.
+The base moved. /work/bb-todo-api.base.bundle has its new tip.
 #+end_example
 
 What to look for:
-- It runs =devops-bb repo-rebase --heading "README links"=, and not its
-  own =git rebase=: it reports =readme-links rebased onto <sha>=. A
-  conflict is listed by file; Claude resolves it and runs =repo-rebase
-  --continue=.
-- It runs =repo-handoff= again.
+- It runs =devops-bb repo-rebase --heading "API"=, and not its own =git
+  rebase=: it reports =api rebased onto <sha>=. A conflict is listed by
+  file; Claude resolves it and runs =repo-rebase --continue=.
+- It runs =bb test= again, then =repo-handoff=.
 
 Land it. This time the log is =(rebased)=: the same commits, rewritten
-on the new base, so your =readme-links= is moved with =reset --keep=
-rather than a merge.
+on the new base, so your =api= is moved with =reset --keep= rather than
+a merge.
 
 #+begin_src sh
-devops-bb wt-land --apply --workbook ~/src/github.com/kpassapk/atomstream-readme-links/work/atomstream.org --heading "README links"
+devops-bb wt-land --apply --workbook ~/src/github.com/kpassapk/bb-todo-api-api/work/todos.org --heading "API"
 #+end_src
 
 * Push, stacked (optional)
 
 The push is the one step that needs a credential, so it is a block you
-run, in the order the stack lands: first branch to =main=, second to the
-first. You need write access to the remote; otherwise skip this, or push
-to your own fork.
+run, in the order the stack lands: core to =main=, the API to core. You
+need write access to the remote; otherwise skip this, or push to your
+own fork.
 
-#+begin_src sh :dir ~/src/github.com/kpassapk/atomstream :eval never-export
-git push origin architecture-notes
-gh pr create --head architecture-notes --base main --title "Architecture notes" --body "Written in a sandbox."
-git push origin readme-links
-gh pr create --head readme-links --base architecture-notes --title "README links" --body "Stacked on architecture-notes."
+#+begin_src sh :dir ~/src/github.com/kpassapk/bb-todo-api :eval never-export
+git push origin core
+gh pr create --head core --base main --title "Core: completing todos" --body "Written in a sandbox."
+git push origin api
+gh pr create --head api --base core --title "API" --body "Stacked on core."
 #+end_src
 
-When the first merges, GitHub retargets the second to =main=. Seed and
+When core merges, GitHub retargets the API's PR to =main=. Seed and
 =repo-rebase= again if you want the agent to follow a squash.
 
 * Try to break it
 
 Run these from a second terminal.
 
-- Put a repo in the workbook directory: =podman exec box-notes git clone
-  ~/atomstream /work/atomstream=. The mode line says sandbox: SUSPENDED
-  (a =.git= is a dot-path) and runs are refused. Remove it.
+- Put a repo in the workbook directory: =podman exec box-core git clone
+  ~/bb-todo-api /work/bb-todo-api=. The mode line says sandbox:
+  SUSPENDED (a =.git= is a dot-path) and runs are refused. Remove it.
 - Have Claude commit a file under =work/= in its clone. =repo-handoff=
   refuses: "commits touch work/". If a bundle with one gets to the host
   anyway (=git bundle create= by hand), =wt-land= refuses it too.
 - Plant a hook in the clone: =echo 'touch /tmp/pwned' >
-  ~/atomstream/.git/hooks/post-checkout=, then hand off and land. The
+  ~/bb-todo-api/.git/hooks/post-checkout=, then hand off and land. The
   hook is not in the bundle, and =/tmp/pwned= does not exist on your
   host.
 - Ask Claude to push. It has no credentials, and the push fails in the
-  container (=podman exec box-notes ls ~/.ssh ~/.config/gh= finds
+  container (=podman exec box-core ls ~/.ssh ~/.config/gh= finds
   neither).
-- Edit the first branch so it conflicts with the second (the same line of
-  =doc/architecture.md=), re-seed with =--rebase= and have Claude run
-  =repo-rebase=. It exits 2 and names the file.
+- Edit the same line of =complete= in core by hand, re-seed the API with
+  =--rebase= and have Claude run =repo-rebase=. It exits 2 and names the
+  file.
 
 * Clean up                                                           :project:
 
 #+begin_src sh :results silent :dir ~/src/github.com/kpassapk
-podman rm -f box-notes box-links
-cd atomstream
-git worktree remove --force ../atomstream-architecture-notes
-git worktree remove --force ../atomstream-readme-links
-git branch -D architecture-notes readme-links
+podman rm -f box-core box-api
+cd bb-todo-api
+git worktree remove --force ../bb-todo-api-core
+git worktree remove --force ../bb-todo-api-api
+git branch -D core api
 git for-each-ref --format='%(refname)' refs/sandbox refs/devops | xargs -n1 git update-ref -d
-rm -f work/atomstream*.bundle
+rm -f work/bb-todo-api*.bundle
 #+end_src

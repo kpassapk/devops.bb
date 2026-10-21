@@ -195,7 +195,7 @@ tells Claude to treat it as data, not instructions.
 
 ** Code: the repo lives in the sandbox
 
-Developing in an existing repo, atomstream say, does not put the repo
+Developing in an existing repo, bb-todo-api say, does not put the repo
 in the workbook dir: its dot-paths (=.git=, =.github=, =.clj-kondo=)
 would suspend it, hashing =target/= on every confirm is slow, and the
 operator would be approving =bb test=, which needs no credential.
@@ -798,9 +798,9 @@ the block captures it. =output FILE LINE= is not in feed mode.
   suspends the buffer; =:file ../x= is refused.
 - A sync block's =#+RESULTS= reaches the sandbox as an output.
 - A run from an indirect buffer reaches its base buffer's feed.
-- atomstream end to end (public, so the guide is repeatable): the host
-  seeds a bundle, Claude clones, edits, commits and bundles back in
-  the sandbox, the host
+- bb-todo-api end to end (a small public babashka repo, built for the
+  guide): the host seeds a bundle, Claude clones, edits, runs =bb test=
+  and bundles back in the sandbox, the host
   fetches into =refs/sandbox/*=, and the push block prompts with the
   commit log; a new bundle re-prompts it.
 - =devops-bb-sandbox-attach= in two workbook buffers of one Emacs gives
@@ -1561,7 +1561,7 @@ host's.
 - [ ] README: the container rows of the sinks table, and the =docker
   run= line.
 
-** TODO 11. A repo in the sandbox: atomstream
+** TODO 11. A repo in the sandbox: bb-todo-api
 :PROPERTIES:
 :BRANCH:   sandbox-11-repo
 :BASE:     sandbox-10-ssh
@@ -1575,7 +1575,7 @@ bundle made from =origin/main..HEAD= carries only =HEAD=, which the
 branch carries.
 
 #+begin_src sh
-REPO=~/src/github.com/kpassapk/atomstream t=$(mktemp -d)
+REPO=~/src/github.com/kpassapk/bb-todo-api t=$(mktemp -d)
 git -C "$REPO" bundle create "$t/seed.bundle" --all
 git clone -q "$t/seed.bundle" "$t/clone"
 git -C "$t/clone" switch -qc spike-feature
@@ -1627,10 +1627,11 @@ lands it in =refs/sandbox/=. The command that works goes in the skill.
   clone": the heading is the task, clone and handoff are tasks, a fix to
   the base is a commit on the base branch, a moved base is
   =repo-rebase=.
-- [ ] atomstream end to end, as =doc/repo_in_sandbox.org= walks it: two
-  headings, two worktrees, a real Claude. Claude clones, edits, commits
-  and hands back with no block (the image has no JVM, so no =clj=
-  tests); the host lands into =refs/sandbox/*= with =fsckObjects=, and
+- [ ] bb-todo-api end to end, as =doc/repo_in_sandbox.org= walks it: a
+  core heading and an API heading, two worktrees, a real Claude. Claude
+  clones, edits, runs =bb test=, commits and hands back with no block
+  (the image has Babashka, no JVM); the API's 404 test sends a fix to
+  core; the host lands into =refs/sandbox/*= with =fsckObjects=, and
   the second heading follows a moved first.
 - [ ] The push block's notice shows =git log --stat
   origin/main..refs/sandbox/<branch>=. Its fingerprint holds the

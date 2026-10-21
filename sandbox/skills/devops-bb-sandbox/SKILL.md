@@ -216,9 +216,10 @@ block for it. Use `git --no-pager` (or `GIT_PAGER=cat`).
 
 - **Never commit under `work/`.** It is the operator's workbook;
   `repo-handoff` refuses, and so does the host.
-- **No JVM here.** The repo's own notes (AGENTS.md, a README) may tell
-  you to use a REPL or `clj`; you can't. Read the code instead, and say
-  in your Result what you could not run.
+- **Babashka here, no JVM.** `bb` tasks and tests run (`bb test`); `clj`,
+  `lein` and a REPL don't. If the repo's own notes (AGENTS.md, a README)
+  need one, read the code instead, and say in your Result what you could
+  not run.
 - **Hand back with `repo-handoff`, not your own `git bundle`.** It names
   the branches, which the host needs, and checks what you committed. Tell
   the operator which branches it holds, then wait: they fetch the bundle
