@@ -40,6 +40,8 @@
 ;;   `:output-dir' must stay inside the directory.
 ;; - A scheme target must have an :allow.
 ;; - Local variables, dir-locals and vc are off in an attached buffer.
+;; - A run saves the buffer as its result lands, unless the file changed
+;;   on disk: Claude's write wins, and no save asks.
 ;;
 ;; The notices and the header line go to ob-confirm-posframe's prompt.
 ;; The state lives in the attachment, :review, which outlives a revert.
@@ -753,6 +755,37 @@ mode, and org's #+PROPERTY and #+STARTUP caches with it."
         (org-mode-restart)))
     (setf (devops-bb-review-state-keywords state) nil)))
 
+;;; Saving results
+
+(defcustom devops-bb-review-save-results t
+  "Non-nil: save an attached workbook as each result is inserted.
+Claude then sees the output and a clean buffer together, and need not
+ask the operator to save.  A workbook that changed on disk since Emacs
+read or wrote it is not saved: Claude's write wins, and the buffer stays
+modified until the operator reverts it."
+  :type 'boolean
+  :group 'devops)
+
+(defun devops-bb-review--save-result (fn &rest args)
+  "Around `org-babel-insert-result' (FN with ARGS): save an attached buffer.
+Never prompts, as this can run in a process filter.  Skips the save when
+the file changed on disk, so that the file Claude wrote is not overwritten."
+  (prog1 (apply fn args)
+    (when devops-bb-review-save-results
+      (let ((base (or (buffer-base-buffer) (current-buffer))))
+        (when (and (devops-bb-review--state base)
+                   (buffer-file-name base)
+                   (buffer-modified-p base))
+          (with-current-buffer base
+            (if (not (verify-visited-file-modtime base))
+                (message "devops-bb: %s changed on disk; not saved"
+                         (file-name-nondirectory buffer-file-name))
+              (condition-case err
+                  (let ((inhibit-message t))
+                    (save-buffer))
+                (error (message "devops-bb: not saved: %s"
+                                (error-message-string err)))))))))))
+
 (defun devops-bb-review--private-dir (name)
   "A directory of Emacs's own, NAME, for an attached buffer's files."
   (let ((dir (file-name-as-directory
@@ -825,11 +858,14 @@ any local variables it read dropped too."
     (org-babel-ref-resolve devops-bb-review--ref-resolve ((depth . -95)))
     (org-babel-generate-file-param devops-bb-review--file-param nil)
     (org-babel-read devops-bb-review--read nil)
+    (org-babel-insert-result devops-bb-review--save-result ((depth . 95)))
     (hack-local-variables devops-bb-review--hack-local-variables nil)
     (vc-refresh-state devops-bb-review--vc-refresh nil))
   "The :around advice the review puts on while any buffer is attached.
 Its run tracking is outermost, outside ob-confirm-posframe's (-90) and
-devops.el's, so it sees a run before either does anything.")
+devops.el's, so it sees a run before either does anything.  The save
+is innermost (95), inside log.clj's, so a `save' entry precedes the
+`result' one.")
 
 (defconst devops-bb-review--hooks
   '((org-babel-after-execute-hook devops-bb-review--after-execute)
