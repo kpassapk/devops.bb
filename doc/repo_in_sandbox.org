@@ -3,6 +3,8 @@
 #+TARGET: todos    ~/src/github.com/kpassapk/bb-todo-api
 #+TARGET: core     ~/src/github.com/kpassapk/bb-todo-api-core
 #+TARGET: api      ~/src/github.com/kpassapk/bb-todo-api-api
+#+TARGET: box_core /podman:box-core:
+#+TARGET: box_api  /podman:box-api:
 #+PROPERTY: header-args:sh :results output
 
 * Intro
@@ -79,8 +81,6 @@ touching its =.gitignore=:
 
 #+begin_src sh :dir ~/src/github.com/kpassapk
   git clone git@github.com:kpassapk/bb-todo-api.git
-  echo 'work/' >> bb-todo-api/.git/info/exclude
-  mkdir -p bb-todo-api/work
 #+end_src
 
 #+RESULTS:
@@ -218,8 +218,8 @@ podman ps | grep "box-"
 #+end_src
 
 #+RESULTS:
-: e6cf270198d8  localhost/devops-bb-sandbox:latest    sleep infinity  About a minute ago  Up About a minute                                                                box-core
-: 4eea1f71ee78  localhost/devops-bb-sandbox:latest    sleep infinity  51 seconds ago      Up 51 seconds                                                                    box-api
+: e6cf270198d8  localhost/devops-bb-sandbox:latest    sleep infinity  4 hours ago   Up 4 hours                                                                 box-core
+: 4eea1f71ee78  localhost/devops-bb-sandbox:latest    sleep infinity  4 hours ago   Up 4 hours                                                                 box-api
 
 Add the sinks, then attach each worktree's workbook in Emacs, from its
 own buffer with =M-x devops-bb-sandbox-attach=:
@@ -257,7 +257,7 @@ Two buffers, two feeds. Neither holds the other's events.
 Seed the bundle, into this worktree's =work/=:
 
 #+begin_src sh
-devops-bb worktree seed --workbook work/todos.org --heading "Core: completing todos"
+  devops-bb worktree seed --workbook work/todos.org --heading "Core: completing todos"
 #+end_src
 
 #+RESULTS:
@@ -266,23 +266,22 @@ devops-bb worktree seed --workbook work/todos.org --heading "Core: completing to
 Expected: =.../work/bb-todo-api.bundle (base at <sha>)=. It is a regular
 file, which the workbook directory allows.
 
-Open Claude in =box-core= (=devops-open-terminal-dwim= on the line):
+** Claude                                                         :box_core:
 
-Put the point on the line below, and run =M-x devops-open-terminal-dwim=.
-Paste the command from your clipboard.
+With the cursor below, try =devops-run-in-terminal=
 
 #+begin_src sh
-  podman exec -it box-core claude
+  claude
 #+end_src
 
 Prompt:
 
 #+begin_example
-Use the devops-bb-sandbox skill. Do the heading "Core: completing
-todos" in /work/todos.org.
+  Use the devops-bb-sandbox skill. Do the heading "Core: completing
+  todos" in /work/todos.org.
 #+end_example
 
-That is all. The task is the heading, and the how is the skill.
+The "what" is the heading, and the "how" is the skill.
 
 What to look for:
 - Claude runs =devops-bb status=, then =repo clone --heading "Core:
@@ -295,7 +294,7 @@ What to look for:
   =modified=. It does not try to push.
 - It does not use a REPL or =clj=: the image has Babashka only.
 
-* Land it                                                             :todos:
+* Land first heading                                                  :todos:
 
 Fetch and read, which moves nothing:
 
@@ -322,17 +321,61 @@ commits needs a re-sign before the push.
 
 Read the change itself:
 
-#+begin_src sh
+#+begin_src sh :wrap src diff
 git --no-pager diff main refs/sandbox/core -- src
+#+end_src
+
+#+RESULTS:
+#+begin_src diff
+diff --git a/src/todos/core.clj b/src/todos/core.clj
+index 4b6f7ff..8466c04 100644
+--- a/src/todos/core.clj
++++ b/src/todos/core.clj
+@@ -18,3 +18,12 @@
+   "Every todo, oldest first."
+   [store]
+   (sort-by :id (vals (:todos store))))
++
++(defn complete
++  "Mark the todo with id ID done. Returns [store todo], or [store nil]
++  with the store unchanged when there is no such todo."
++  [store id]
++  (if-let [todo (get-in store [:todos id])]
++    (let [todo (assoc todo :done? true)]
++      [(assoc-in store [:todos id] todo) todo])
++    [store nil]))
 #+end_src
 
 If you like it, move the branch (in its worktree, which has it checked
 out; =work/= keeps its edits):
 
 #+begin_src sh
-devops-bb worktree land --apply --workbook ~/src/github.com/kpassapk/bb-todo-api-core/work/todos.org --heading "Core: completing todos"
+git status
+#+end_src
+
+#+RESULTS:
+: On branch main
+: nothing to commit, working tree clean
+
+#+begin_src sh
+  devops-bb worktree land --apply --workbook ~/src/github.com/kpassapk/bb-todo-api-core/work/todos.org --heading "Core: completing todos"
+#+end_src
+
+#+RESULTS:
+: == core (ff)
+: c25f7d2 Add complete: mark a todo done
+: 
+:  src/todos/core.clj       | 9 +++++++++
+:  test/todos/core_test.clj | 8 ++++++++
+:  2 files changed, 17 insertions(+)
+
+#+begin_src sh
 devops-bb worktree status --workbook work/todos.org
 #+end_src
+
+#+RESULTS:
+: core                     on main              1 commits  seed current /Users/kyle/src/github.com/kpassapk/bb-todo-api-core
+: api                      on core              0 commits  seed none    /Users/kyle/src/github.com/kpassapk/bb-todo-api-api
 
 * Second heading: API, and a fix to core                               :api:
 
@@ -340,10 +383,21 @@ The API is cut from the branch you just landed. Seed it from its own
 worktree:
 
 #+begin_src sh
-devops-bb worktree seed --workbook work/todos.org --heading "API"
+  devops-bb worktree seed --workbook work/todos.org --heading "API"
 #+end_src
 
-Prompt, in =box-api=:
+#+RESULTS:
+: /Users/kyle/src/github.com/kpassapk/bb-todo-api-api/work/bb-todo-api.bundle (base at c25f7d2)
+
+** Claude                                                          :box_api:
+
+With point in the block below, do =devops-run-in-terminal=
+
+#+begin_src sh
+  claude
+#+end_src
+
+Paste in this prompt:
 
 #+begin_example
 Use the devops-bb-sandbox skill. Do the heading "API" in
@@ -361,12 +415,147 @@ What to look for:
 - =repo handoff= lists /two/ branches. Its Result says which commits are
   for the base.
 
+* Land second heading                                                 :todos:
+
 Land both. The log shows the model fix under =core= and the handler
 under =api=:
 
 #+begin_src sh
-devops-bb worktree land --workbook ~/src/github.com/kpassapk/bb-todo-api-api/work/todos.org --heading "API"
+  devops-bb worktree land --workbook ~/src/github.com/kpassapk/bb-todo-api-api/work/todos.org --heading "API"
 #+end_src
+
+#+RESULTS:
+#+begin_example
+== api (ff)
+ed7dd0e Add todos.api: a JSON Ring handler over the store, and bb serve
+
+ bb.edn                  | 11 ++++++++++-
+ src/todos/api.clj       | 61 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ test/todos/api_test.clj | 51 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 122 insertions(+), 1 deletion(-)
+c25f7d2 Add complete: mark a todo done
+
+ src/todos/core.clj       | 9 +++++++++
+ test/todos/core_test.clj | 8 ++++++++
+ 2 files changed, 17 insertions(+)
+
+nothing moved; --apply to fast-forward
+#+end_example
+
+Read the change itself:
+
+#+begin_src sh :wrap src diff
+git --no-pager diff main refs/sandbox/api -- src
+#+end_src
+
+#+RESULTS:
+#+begin_src diff
+diff --git a/src/todos/api.clj b/src/todos/api.clj
+new file mode 100644
+index 0000000..9f962fb
+--- /dev/null
++++ b/src/todos/api.clj
+@@ -0,0 +1,61 @@
++(ns todos.api
++  "A Ring handler over todos.core. The store lives in an atom; requests
++  and responses are JSON."
++  (:require
++   [cheshire.core :as json]
++   [todos.core :as core]))
++
++(defn- respond
++  [status body]
++  {:status  status
++   :headers {"Content-Type" "application/json"}
++   :body    (json/generate-string body)})
++
++(defn- read-json
++  "The request body parsed as JSON with keyword keys, or nil when it is
++  missing or not JSON."
++  [request]
++  (when-let [body (:body request)]
++    (try (json/parse-string (slurp body) true)
++         (catch Exception _ nil))))
++
++(defn- update-store!
++  "Apply F, a store -> [store x] function, to the atom and return x."
++  [store-atom f]
++  (let [result (volatile! nil)]
++    (swap! store-atom (fn [store]
++                        (let [[store x] (f store)]
++                          (vreset! result x)
++                          store)))
++    @result))
++
++(defn- list-todos [store-atom]
++  (respond 200 (core/all @store-atom)))
++
++(defn- create-todo [store-atom request]
++  (let [title (:title (read-json request))]
++    (if (and (string? title) (seq title))
++      (respond 201 (update-store! store-atom #(core/add % title)))
++      (respond 400 {:error "title must be a non-empty string"}))))
++
++(defn- complete-todo [store-atom id]
++  (if-let [todo (update-store! store-atom #(core/complete % id))]
++    (respond 200 todo)
++    (respond 404 {:error (str "no todo with id " id)})))
++
++(defn handler
++  "A Ring handler over the store in STORE-ATOM:
++
++    GET  /todos                 every todo
++    POST /todos                 {\"title\": ...} adds one, 201
++    POST /todos/:id/complete    marks it done, 404 if there is none"
++  [store-atom]
++  (fn [{:keys [request-method uri] :as request}]
++    (let [complete-id (some-> (re-matches #"/todos/(\d+)/complete" uri)
++                              second
++                              parse-long)]
++      (cond
++        (and (= uri "/todos") (= request-method :get))  (list-todos store-atom)
++        (and (= uri "/todos") (= request-method :post)) (create-todo store-atom request)
++        (and complete-id (= request-method :post))      (complete-todo store-atom complete-id)
++        :else (respond 404 {:error "not found"})))))
+diff --git a/src/todos/core.clj b/src/todos/core.clj
+index 4b6f7ff..8466c04 100644
+--- a/src/todos/core.clj
++++ b/src/todos/core.clj
+@@ -18,3 +18,12 @@
+   "Every todo, oldest first."
+   [store]
+   (sort-by :id (vals (:todos store))))
++
++(defn complete
++  "Mark the todo with id ID done. Returns [store todo], or [store nil]
++  with the store unchanged when there is no such todo."
++  [store id]
++  (if-let [todo (get-in store [:todos id])]
++    (let [todo (assoc todo :done? true)]
++      [(assoc-in store [:todos id] todo) todo])
++    [store nil]))
+#+end_src
+
+#+begin_src sh
+  devops-bb worktree land --apply --workbook ~/src/github.com/kpassapk/bb-todo-api-api/work/todos.org --heading "Core: completing todos"
+#+end_src
+
+#+RESULTS:
+#+begin_example
+== api (ff)
+ed7dd0e Add todos.api: a JSON Ring handler over the store, and bb serve
+
+ bb.edn                  | 11 ++++++++++-
+ src/todos/api.clj       | 61 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ test/todos/api_test.clj | 51 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 122 insertions(+), 1 deletion(-)
+c25f7d2 Add complete: mark a todo done
+
+ src/todos/core.clj       | 9 +++++++++
+ test/todos/core_test.clj | 8 ++++++++
+ 2 files changed, 17 insertions(+)
+#+end_example
+
 
 The base's commit is reviewed as the base's. Then =--apply=: both move
 fast-forward, each in its worktree.
