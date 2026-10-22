@@ -1,7 +1,8 @@
 (ns devops.bb.repo-test
-  "The core/API loop, with real git in a temp dir: two headings, two
-  worktrees, an agent's clone that fixes core from the API's side, a
-  base that moves, and a rebase."
+  "The core/API loop, with real git in a temp dir: two headings, each in
+  a workbook of its own outside the checkout, two worktrees, an agent's
+  clone that fixes core from the API's side, a base that moves, and a
+  rebase."
   (:require
    [babashka.fs :as fs]
    [babashka.process :as p]
@@ -24,45 +25,51 @@
   (git dir "commit" "-q" "-m" msg)
   (git dir "rev-parse" "HEAD"))
 
-(def workbook "#+TITLE: wb\n
-* TODO Core model
-:PROPERTIES:
-:BRANCH: core
-:BASE: main
-:END:
-* TODO API
-:PROPERTIES:
-:BRANCH: api
-:BASE: core
-:END:
-")
+(defn- heading [title branch base top]
+  (str "* TODO " title "\n:PROPERTIES:\n:BRANCH: " branch "\n:BASE: " base
+       "\n:REPO: " top "\n:END:\n"))
+
+(defn- workbook!
+  "A task's workbook, in a dir of its own under ROOT/active, as aly-root
+  lays them out: one heading, its :REPO: the checkout TOP."
+  [root dir title branch base top]
+  (let [f (fs/path root "active" dir "work.org")]
+    (fs/create-dirs (fs/parent f))
+    (spit (str f) (str "#+TITLE: " dir "\n" (heading title branch base top)))
+    (str f)))
 
 (defn- fixture
-  "A checkout `atomstream' with the workbook committed, in a temp dir."
+  "A checkout `atomstream', with its own workbooks committed under work/,
+  in a temp dir."
   []
   (let [root (str (fs/canonicalize (fs/create-temp-dir)))
         top  (str (fs/path root "atomstream"))]
     (fs/create-dirs top)
     (git top "init" "-q" "-b" "main")
     (commit! top "src/model.clj" "v1\n" "model v1")
-    (commit! top "work/wb.org" workbook "workbook")
+    (commit! top "work/todos.org" "* TODO the repo's own\n" "workbook")
     {:root root :top top}))
 
 (deftest core-api-loop-test
   (let [{:keys [root top]} (fixture)
-        wb     (str (fs/path top "work/wb.org"))
-        core   (:path (repo/add! {:workbook wb :heading "Core"}))
-        api    (:path (repo/add! {:workbook wb :heading "API"}))
-        core-wb (str (fs/path core "work/wb.org"))
-        api-wb  (str (fs/path api "work/wb.org"))
+        core-wb (workbook! root "core" "Core model" "core" "main" top)
+        api-wb  (workbook! root "api" "API" "api" "core" top)
+        core   (:path (repo/add! {:workbook core-wb :heading "Core"}))
+        api    (:path (repo/add! {:workbook api-wb :heading "API"}))
+        todos  (str (fs/path api "work/todos.org"))
         agent  (str (fs/path root "agent-api"))]
     (is (= "atomstream-core" (str (fs/file-name core))))
-    (is (fs/exists? api-wb) "the live workbook is in the worktree")
-    (spit api-wb (str workbook "edited, uncommitted\n"))
+    (is (not (fs/exists? (fs/path api "work" "work.org"))) "no workbook is copied in")
+    (spit todos "edited, uncommitted\n")
+
+    (testing "status reads every workbook, each heading against its :REPO:"
+      (is (= [["core" "main" core] ["api" "core" api]]
+             (map (juxt :branch :base :worktree) (repo/status {:workbook [core-wb api-wb]})))))
 
     (testing "seed, then the agent clones on its branch from the base"
       (let [{:keys [bundle]} (repo/seed! {:workbook api-wb :heading "API"})]
-        (is (= "atomstream.bundle" (str (fs/file-name bundle))) "named for the main checkout"))
+        (is (= "atomstream.bundle" (str (fs/file-name bundle))) "named for the :REPO:")
+        (is (= (str (fs/parent api-wb)) (str (fs/parent bundle))) "beside the workbook"))
       (let [r (repo/clone! {:workbook api-wb :heading "API" :dir agent})]
         (is (= "api" (:branch r)))
         (is (= (git top "rev-parse" "core") (:base-sha r)))
@@ -86,7 +93,7 @@
       (repo/land! {:workbook api-wb :heading "API" :apply true})
       (is (= "v2" (str/trim (slurp (str (fs/path core "src/model.clj"))))))
       (is (= "api" (str/trim (slurp (str (fs/path api "src/api.clj"))))))
-      (is (str/includes? (slurp api-wb) "edited, uncommitted") "the workbook edit stays"))
+      (is (= "edited, uncommitted\n" (slurp todos)) "the repo's own work/ edit stays"))
 
     (testing "the base moves: seed --rebase, the agent rebases api onto it"
       (commit! core "src/model.clj" "v3\n" "core: model v3, by hand")
@@ -108,14 +115,13 @@
       (let [rs (repo/land! {:workbook api-wb :heading "API" :apply true})]
         (is (= :rebased (:state (first (filter #(= "api" (:branch %)) rs))))))
       (is (= (git agent "rev-parse" "api") (git top "rev-parse" "api")))
-      (is (str/includes? (slurp api-wb) "edited, uncommitted")))))
+      (is (= "edited, uncommitted\n" (slurp todos))))))
 
 (deftest rebase-conflict-test
   (let [{:keys [root top]} (fixture)
-        wb    (str (fs/path top "work/wb.org"))
-        api   (:path (repo/add! {:workbook wb :heading "API" :base "main"}))
-        api-wb (str (fs/path api "work/wb.org"))
+        api-wb (workbook! root "api" "API" "api" "main" top)
         agent (str (fs/path root "agent"))]
+    (repo/add! {:workbook api-wb :heading "API"})
     (repo/seed! {:workbook api-wb :heading "API" :base "main"})
     (repo/clone! {:workbook api-wb :heading "API" :base "main" :dir agent})
     (commit! agent "src/model.clj" "agent\n" "agent edit")
@@ -131,10 +137,9 @@
 
 (deftest guards-test
   (let [{:keys [root top]} (fixture)
-        wb    (str (fs/path top "work/wb.org"))
-        api   (:path (repo/add! {:workbook wb :heading "API" :base "main"}))
-        api-wb (str (fs/path api "work/wb.org"))
+        api-wb (workbook! root "api" "API" "api" "main" top)
         agent (str (fs/path root "agent"))]
+    (repo/add! {:workbook api-wb :heading "API"})
     (repo/seed! {:workbook api-wb :heading "API" :base "main"})
     (repo/clone! {:workbook api-wb :heading "API" :base "main" :dir agent})
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"nothing to hand off"
@@ -143,10 +148,16 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"touch work/"
                           (repo/handoff! {:workbook api-wb :heading "API" :dir agent})))
     (testing "the host checks too, whatever the agent's bundle holds"
-      (git agent "bundle" "create" "-q" (str (fs/path api "work" "atomstream.out.bundle"))
+      (git agent "bundle" "create" "-q" (str (fs/path (fs/parent api-wb) "atomstream.out.bundle"))
            "--branches" "--not" "--remotes=origin")
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"touches work/"
                             (repo/land! {:workbook api-wb :heading "API"}))))
+    (testing "a heading with no :REPO: needs --repo on the host"
+      (let [wb (str (fs/path root "active" "bare.org"))]
+        (spit wb "* TODO Bare\n:PROPERTIES:\n:BRANCH: bare\n:END:\n")
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no repo"
+                              (repo/seed! {:workbook wb :heading "Bare"})))
+        (is (:bundle (repo/seed! {:workbook wb :heading "Bare" :repo top})))))
     (testing "no clone twice, and the same branch as its base"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"exists"
                             (repo/clone! {:workbook api-wb :heading "API" :base "main" :dir agent})))

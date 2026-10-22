@@ -6,9 +6,12 @@
 
     :BRANCH:  api         the branch the work is committed on
     :BASE:    core        the branch it is cut from: main, or another heading's
-    :REPO:    ~/src/...   optional, for its name; else the checkout's
+    :REPO:    ~/src/...   the operator's checkout (or --repo); its name
+                          names the bundle files
 
-  and the workbook's own dir (`work', beside the .org) is the only thing
+  The workbook need not be in that checkout, and nothing here looks for
+  one there: the repo is the heading's :REPO:, never the workbook's
+  location.  The workbook's own dir (`work', beside the .org) is the only thing
   the two sides share, three files of it, NAME being the repo's:
 
     NAME.bundle       seed: the operator's branches
@@ -83,20 +86,21 @@
     (when (= 1 (count names)) (first names))))
 
 (defn task
-  "The task OPTS name: {:branch :base :name :work :workbook}.  --heading
-  (with --workbook, or the feed's) gives the BRANCH, BASE and REPO of a
-  heading; --branch, --base and --name override it.  :work is the
-  workbook's dir, else --work, else /work.  :name is, failing those, the
-  one seed bundle's.  :branch may be nil."
-  [{:keys [heading branch base name work] :as opts}]
+  "The task OPTS name: {:branch :base :repo :name :work :workbook}.
+  --heading (with --workbook, or the feed's) gives the BRANCH, BASE and
+  REPO of a heading; --branch, --base, --repo and --name override it.
+  :work is the workbook's dir, else --work, else /work.  :name is, failing
+  those, the one seed bundle's.  :branch and :repo may be nil."
+  [{:keys [heading branch base repo name work] :as opts}]
   (let [wb     (when (or heading (:workbook opts) (feed/configured opts)) (read-workbook opts))
         props  (when (and wb heading) (:props (org/find-heading (:text wb) heading)))
         branch (or branch (get props "BRANCH"))
         base   (or base (get props "BASE") "main")
+        repo   (some-> (or repo (get props "REPO")) fs/expand-home str)
         work-dir (str (or (some-> wb :path fs/parent) (some-> work fs/expand-home) "/work"))]
     (when (= branch base) (fail! (str "branch and base are both " branch)))
-    {:branch branch :base base
-     :name (or name (some-> (get props "REPO") fs/expand-home fs/file-name str) (seed-name work-dir))
+    {:branch branch :base base :repo repo
+     :name (or name (some-> repo fs/file-name str) (seed-name work-dir))
      :work work-dir
      :workbook (:path wb)}))
 
@@ -206,7 +210,12 @@
 
 ;;; On the host
 
-(defn- toplevel [workbook] (git (fs/parent workbook) "rev-parse" "--show-toplevel"))
+(defn- toplevel
+  "The checkout at REPO: any dir in it, a linked worktree's too."
+  [repo]
+  (when-not repo (fail! "no repo: pass --repo, or give the heading a :REPO:"))
+  (when-not (fs/directory? repo) (fail! (str "no such repo: " repo)))
+  (git repo "rev-parse" "--show-toplevel"))
 
 (defn- repo-name
   "The checkout's name: its main worktree's dir, not a linked one's."
@@ -215,15 +224,12 @@
     (str (fs/file-name (if (= ".git" (str (fs/file-name common))) (fs/parent common) top)))))
 
 (defn- host-task
-  "The task OPTS name, with the checkout its workbook is in: a
-  worktree's, when the workbook is."
+  "The task OPTS name, with its checkout."
   [opts]
   (let [wb  (read-workbook opts)
         t   (task! (assoc opts :workbook (:path wb)))
-        top (toplevel (:path wb))]
-    (assoc t :top top
-           :name (or (:name t) (repo-name top))
-           :rel (str (fs/relativize top (:path wb))))))
+        top (toplevel (:repo t))]
+    (assoc t :top top :name (or (:name t) (repo-name top)))))
 
 (defn- seeded-key [branch] (str "refs/devops/seeded/" branch))
 
@@ -253,18 +259,14 @@
 
 (defn add!
   "Make the heading's worktree, a sibling of the checkout (or --path), on
-  BRANCH cut from BASE, with the live workbook copied over its own.
-  {:path}"
+  BRANCH cut from BASE.  {:path}"
   [opts]
-  (let [{:keys [top branch base name workbook rel]} (host-task opts)
+  (let [{:keys [top branch base name]} (host-task opts)
         path (str (fs/absolutize (fs/expand-home
                                   (or (:path opts) (fs/path (fs/parent top) (str name "-" branch))))))]
     (if (rev top (str "refs/heads/" branch))
       (git top "worktree" "add" "-q" path branch)
       (git top "worktree" "add" "-q" "-b" branch path base))
-    ;; The workbook is working memory: dirty in the worktree, never committed.
-    (fs/create-dirs (fs/parent (fs/path path rel)))
-    (fs/copy workbook (fs/path path rel) {:replace-existing true})
     {:path path}))
 
 (defn- ahead [top from to] (parse-long (git top "rev-list" "--count" (str from ".." to))))
@@ -312,19 +314,21 @@
           :log (git top "log" "--stat" "--format=%h %s" (str from ".." ref))})))))
 
 (defn status
-  "One map per heading with a :BRANCH:, in order: its worktree, its
-  commits over BASE, whether it was seeded from the base's current tip
-  (:seed is :none, :current or :stale), and how many commits the agent
-  handed back that are not landed."
+  "One map per heading with a :BRANCH:, in order, over every workbook
+  --workbook names (once or more): its worktree, its commits over BASE,
+  whether it was seeded from the base's current tip (:seed is :none,
+  :current or :stale), and how many commits the agent handed back that
+  are not landed.  Each heading's repo is its own :REPO:, or --repo."
   [opts]
-  (let [{:keys [path text]} (read-workbook opts)
-        top (toplevel path)
-        wts (worktrees top)]
+  (let [wbs (let [w (:workbook opts)] (if (sequential? w) w [w]))]
     (vec
-     (for [{:keys [title props]} (org/headings text)
+     (for [wb wbs
+           {:keys [title props]} (org/headings (:text (read-workbook (assoc opts :workbook wb))))
            :let [branch (get props "BRANCH") base (get props "BASE" "main")]
            :when branch]
-       (let [bsha   (rev top (str "refs/heads/" base))
+       (let [top    (toplevel (some-> (or (:repo opts) (get props "REPO")) fs/expand-home str))
+             wts    (worktrees top)
+             bsha   (rev top (str "refs/heads/" base))
              seeded (rev top (seeded-key branch))
              local  (rev top (str "refs/heads/" branch))
              sand   (rev top (str "refs/sandbox/" branch))]
@@ -348,6 +352,7 @@
    :workbook {:desc "The workbook; default: the feed's"}
    :branch   {:desc "Overrides the heading's :BRANCH:"}
    :base     {:desc "Overrides the heading's :BASE: (default main)"}
+   :repo     {:desc "The operator's checkout; default: the heading's :REPO:"}
    :name     {:desc "The repo's name for the bundle files; default: the heading's :REPO:"}
    :dir      {:desc "Claude's clone; default ~/NAME"}})
 
@@ -380,7 +385,7 @@
                :else     (println (str rebased " rebased onto " (short onto)))))))
 
 (defn wt-add
-  "Add the heading's worktree, with the live workbook in it"
+  "Add the heading's worktree"
   {:org.babashka/cli {:spec (assoc heading-spec :path {:desc "Default: beside the checkout, as NAME-BRANCH"})
                       :require [:workbook :heading]}}
   [opts]
@@ -413,8 +418,10 @@
            (System/exit 2)))))
 
 (defn wt-status
-  "The workbook's headings with a :BRANCH:, and where each stands"
-  {:org.babashka/cli {:spec {:workbook {:desc "The workbook"}} :require [:workbook]}}
+  "The workbooks' headings with a :BRANCH:, and where each stands"
+  {:org.babashka/cli {:spec {:workbook {:desc "A workbook; once per workbook" :coerce []}
+                             :repo     {:desc "Overrides every heading's :REPO:"}}
+                      :require [:workbook]}}
   [opts]
   (run status opts
        (fn [rows]
