@@ -24,15 +24,15 @@ This example uses disk space; a more useful example might use the AWS or Github 
 
 To summarize, here is what each party owns:
 
-Operator:
+*Operator*:
 - filesystem
 - CLIs  
 
-Agent:
+*Agent*:
 - workbook
 - coding: file read + write, tools like python, grep
 
-Both:
+*Both*:
 - the workbook
 - the work/ directory containing your workbook
     

@@ -1,0 +1,959 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>devops.bb: an agent in a box, an operator at the keys</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Schibsted+Grotesk:wght@500;600;700&display=swap">
+<style>
+/* Layout: a 1280x720 stage drawn as an Emacs frame (title bar, buffer, mode line), scaled to the page.
+   Operator lane on the left, shared workbook in the centre, agent lane on the right. Player controls beneath.
+   One dark editor theme, by choice. */
+:root{
+  color-scheme:dark;
+  --bg:#121519;
+  --panel:#171b21;
+  --raise:#1e232b;
+  --line:#2b323c;
+  --fg:#e2e6ec;
+  --fg2:#c3c9d2;
+  --dim:#8d96a4;
+  --faint:#5a6370;
+  --op:#f2b04a;
+  --op-soft:rgba(242,176,74,.13);
+  --ag:#5ec7d9;
+  --ag-soft:rgba(94,199,217,.13);
+  --ag-faint:rgba(94,199,217,.05);
+  --bad:#f0625b;
+  --bad-soft:rgba(240,98,91,.10);
+  --on-accent:#15120b;
+  --scrim:rgba(18,21,25,.78);
+  --shadow:rgba(0,0,0,.45);
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:"Schibsted Grotesk","Segoe UI",system-ui,-apple-system,sans-serif;
+}
+[hidden]{display:none!important}
+html,body{background:var(--bg);color:var(--fg)}
+body{
+  font-family:var(--sans);
+  padding-block:20px 32px;
+  padding-left:max(16px, env(safe-area-inset-left, 0px));
+  padding-right:max(16px, env(safe-area-inset-right, 0px));
+}
+.page{max-width:1120px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px}
+.head h1{font-family:var(--mono);font-size:1.15rem;font-weight:600;margin:0;letter-spacing:-.01em}
+.head p{margin:0;color:var(--dim);font-size:.95rem}
+
+/* ---------- viewport + stage ---------- */
+.viewport{position:relative;width:100%;max-width:100%;aspect-ratio:16/9;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:var(--bg)}
+.viewport:fullscreen{border:0;border-radius:0;aspect-ratio:auto;width:100vw;height:100vh}
+.stage{position:absolute;left:0;top:0;width:1280px;height:720px;transform-origin:0 0;overflow:hidden;background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px}
+.stage *{box-sizing:border-box}
+.svg{position:absolute;left:0;top:0}
+
+.titlebar{position:absolute;left:0;top:0;width:1280px;height:32px;display:flex;align-items:center;gap:12px;padding:0 18px;background:var(--panel);border-bottom:1px solid var(--line);z-index:20}
+.tb-name{font-family:var(--mono);font-weight:600;font-size:14px}
+.tb-sub{font-size:13px;color:var(--dim)}
+.tb-scene{margin-left:auto;font-family:var(--mono);font-size:12.5px;color:var(--dim);letter-spacing:.02em}
+
+.modeline{position:absolute;left:0;top:688px;width:1280px;height:32px;display:flex;align-items:center;gap:14px;padding:0 18px;background:var(--raise);border-top:1px solid var(--line);font-family:var(--mono);font-size:13.5px;color:var(--dim);z-index:20;white-space:pre}
+.ml-buf{color:var(--fg);font-weight:600}
+.ml-sb{padding:1px 8px;border:1px solid var(--op);border-radius:3px;color:var(--op)}
+.ml-sb.flash{background:var(--op);color:var(--on-accent)}
+.ml-sb.bad{background:var(--bad);border-color:var(--bad);color:var(--on-accent)}
+.ml-right{margin-left:auto}
+
+/* svg parts */
+.ts{stroke:var(--op);stroke-width:1.6;stroke-dasharray:3 6;stroke-linecap:round}
+.ts-label{font-family:var(--mono);font-size:12px;fill:var(--dim)}
+.blk-ghost{stroke:var(--faint);stroke-width:1.5;stroke-dasharray:2 7}
+.blk-line{stroke:var(--ag);stroke-width:2.2;stroke-dasharray:7 6}
+.blk-head{fill:var(--ag)}
+.bar{stroke:var(--bad);stroke-width:5;stroke-linecap:round}
+.bar-c{fill:var(--bg);stroke:var(--bad);stroke-width:2}
+.bar-x{stroke:var(--bad);stroke-width:2.2;stroke-linecap:round}
+.bar-t{font-family:var(--mono);font-size:13px;fill:var(--bad)}
+.pipe{fill:none;stroke:var(--line);stroke-width:13;stroke-linejoin:round;stroke-linecap:round;stroke-dasharray:1 1}
+.flow{fill:none;stroke-width:2.5;stroke-dasharray:2 15;stroke-linecap:round}
+.flow.op{stroke:var(--op)}
+.flow.ag{stroke:var(--ag)}
+.pipe-head{fill:none;stroke:var(--dim);stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+.pipe-head.ag{stroke:var(--ag)}
+.conn{stroke:var(--dim);stroke-width:1.5;stroke-dasharray:3 4}
+.ring-ag{fill:none;stroke:var(--ag);stroke-width:2;stroke-dasharray:6 6}
+.ring-bad{fill:none;stroke:var(--bad);stroke-width:2.4;stroke-dasharray:5 16}
+.warn-tri{fill:var(--bad)}
+.warn-mark{stroke:var(--on-accent);stroke-width:2.6;stroke-linecap:round}
+.lap-glow{fill:none;stroke:var(--op);stroke-width:9}
+.lap-bezel{fill:var(--panel);stroke:var(--op);stroke-width:2}
+.lap-screen{fill:var(--bg);stroke:var(--line)}
+.lap-base{fill:var(--raise);stroke:var(--op);stroke-width:2;stroke-linejoin:round}
+.lap-notch{fill:var(--line)}
+.scr{font-family:var(--mono);font-size:13px;fill:var(--fg)}
+.scr .p{fill:var(--op)}
+.scr-dim{fill:var(--dim)}
+.scr-caret{fill:var(--op)}
+.scr-key{fill:var(--op);font-size:15px;font-weight:600}
+.box-glow{fill:none;stroke:var(--ag);stroke-width:9}
+.box-wall{fill:var(--ag-faint);stroke:var(--ag);stroke-width:2;stroke-dasharray:1 1}
+.box-inner{fill:none;stroke:var(--ag);stroke-opacity:.3;stroke-dasharray:3 4}
+.rivet{fill:var(--ag)}
+.lock-bg{fill:var(--bg)}
+.lock-body{fill:var(--ag)}
+.lock-shackle{fill:none;stroke:var(--ag);stroke-width:2.2}
+.dot.op{fill:var(--op)}
+.dot.ag{fill:var(--ag)}
+.dot-t{font-family:var(--mono);font-size:12px;fill:var(--op);text-anchor:middle}
+.ag-body{fill:var(--panel);stroke:var(--ag);stroke-width:2}
+.ag-pins{stroke:var(--ag);stroke-width:2;stroke-linecap:round}
+.ag-spark{fill:var(--ag)}
+
+/* nodes */
+.node{position:absolute;left:0;top:0;width:0;height:0}
+.node .g{position:absolute;left:0;top:0;transform:translate(-50%,-50%);border-radius:50%;background:var(--raise);border:1px solid var(--line);display:grid;place-items:center;color:var(--fg)}
+.node .g svg{width:56%;height:56%}
+.node .lbl{position:absolute;left:0;transform:translateX(-50%);font-family:var(--mono);color:var(--dim);white-space:nowrap;background:var(--bg);padding:0 4px;border-radius:3px;line-height:1.3}
+.node .ring{position:absolute;left:0;top:0;transform:translate(-50%,-50%);border-radius:50%;border:2px dashed var(--ag)}
+
+.lane-lbl{position:absolute;left:0;top:0;font-family:var(--mono);font-size:13px;white-space:nowrap;letter-spacing:.02em}
+.lane-lbl.op{color:var(--op)}
+.lane-lbl.ag{color:var(--ag)}
+
+.agent{position:absolute;left:0;top:0;width:44px;height:44px;transform-origin:50% 50%;z-index:6}
+
+/* agent box contents */
+.boxin{position:absolute;left:0;top:0;width:250px;height:220px;z-index:5}
+.box-status{position:absolute;left:64px;top:27px;font-family:var(--mono);font-size:12px;color:var(--dim);white-space:nowrap}
+.chips{position:absolute;left:16px;right:16px;top:72px;display:flex;flex-wrap:wrap;gap:8px}
+.chip{position:relative;display:inline-block;padding:5px 10px;border:1px solid var(--line);border-radius:5px;font-family:var(--mono);font-size:13px;line-height:18px;color:var(--faint);background:var(--bg)}
+.chip .lit{position:absolute;left:-1px;top:-1px;right:-1px;bottom:-1px;padding:5px 10px;border:1px solid var(--ag);border-radius:5px;background:var(--ag-soft);color:var(--fg)}
+.bbcode{position:absolute;left:14px;right:10px;top:60px;font-family:var(--mono);font-size:11.5px;line-height:17px;white-space:pre;color:var(--fg)}
+.bbcode .cm{color:var(--dim)}
+.bbcode .sh{color:var(--dim);margin-top:8px}
+.bbcode .ok{color:var(--ag);font-weight:600}
+
+/* workbook */
+.wb{position:absolute;left:320px;top:52px;width:640px;height:428px;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden;transform-origin:50% 50%;z-index:3}
+.wb-bar{height:32px;display:flex;align-items:center;gap:10px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--raise)}
+.wb-tag{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+.wb-file{font-family:var(--mono);font-size:13px;color:var(--fg)}
+.wb-path{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--faint)}
+.wb-hl{position:absolute;left:8px;right:8px;top:141px;height:66px;border:1.5px solid var(--op);border-radius:5px;background:var(--op-soft)}
+.wb-scan{position:absolute;left:8px;right:8px;top:244px;height:20px;background:var(--ag-soft);border-left:3px solid var(--ag)}
+.ln{position:absolute;left:0;right:0;height:20px;padding-left:34px;font-family:var(--mono);font-size:14px;line-height:20px;white-space:pre;color:var(--fg)}
+.ln .gut{position:absolute;left:16px;top:3px;width:3px;height:14px;border-radius:2px}
+.gut.op{background:var(--op)}
+.gut.ag{background:var(--ag)}
+.gut.res{background:var(--op);opacity:.45}
+.ln.kw{color:var(--dim)}
+.ln.h{font-weight:600}
+.ln.res{color:var(--fg2)}
+.caret{display:inline-block;width:8px;height:16px;vertical-align:-3px;margin-left:1px}
+.caret.op{background:var(--op)}
+.caret.ag{background:var(--ag)}
+
+/* scene 3 */
+.win{position:absolute;top:96px;width:285px;height:230px;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden;z-index:3}
+.win-bar{height:28px;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--dim);background:var(--raise)}
+.dot-i{width:8px;height:8px;border-radius:50%}
+.dot-i.op{background:var(--op)}
+.dot-i.ag{background:var(--ag)}
+.win-body{position:absolute;left:0;right:0;top:28px;bottom:0;overflow:hidden;padding:4px 12px 0}
+.scroll{font-family:var(--mono);font-size:12px;line-height:18px;white-space:pre;color:var(--fg2)}
+.scroll .p{color:var(--op)}
+.scroll .a{color:var(--ag)}
+.scroll .e{color:var(--bad)}
+.snip{position:absolute;left:0;top:0;padding:4px 9px;font-family:var(--mono);font-size:12px;line-height:16px;background:var(--raise);border:1px solid;border-radius:4px;white-space:nowrap;z-index:7}
+.snip.cmd{border-color:var(--ag);color:var(--fg)}
+.snip.out{border-color:var(--op);color:var(--fg2)}
+.incident{position:absolute;left:640px;top:64px;display:flex;align-items:center;gap:10px;padding:7px 14px;border:1.5px solid var(--bad);border-radius:6px;background:var(--bad-soft);font-size:16px;white-space:nowrap;z-index:8}
+.inc-k{font-family:var(--mono);font-weight:600;color:var(--bad)}
+.inc-n{font-family:var(--mono);font-size:13px;color:var(--dim);padding-left:10px;border-left:1px solid var(--line);font-variant-numeric:tabular-nums}
+
+/* pipes */
+.pipe-lbl{position:absolute;padding:3px 10px;background:var(--bg);border:1px solid var(--line);border-radius:4px;font-family:var(--mono);font-size:12.5px;color:var(--dim);white-space:nowrap;transform:translateY(-50%);z-index:2}
+.pipe-lbl b{color:var(--fg);font-weight:600;margin-right:6px}
+.sink{position:absolute;padding:3px 10px;border-radius:4px;background:var(--ag);color:var(--on-accent);font-family:var(--mono);font-size:12px;font-weight:600;white-space:nowrap;z-index:2}
+
+/* scene 5 */
+.confirm{position:absolute;left:14px;top:248px;width:300px;padding:14px 16px;background:var(--raise);border:1.5px solid var(--op);border-radius:8px;box-shadow:0 12px 32px var(--shadow);transform-origin:0 0;display:flex;flex-direction:column;gap:10px;z-index:9}
+.cf-top{display:flex;justify-content:space-between;align-items:baseline;font-size:17px;font-weight:600}
+.cf-k{font-family:var(--mono);font-size:12px;color:var(--dim);font-weight:400}
+.cf-warn{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:13px;color:var(--op)}
+.cf-warn svg{flex:none}
+.cf-code{font-family:var(--mono);font-size:13px;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:5px 9px}
+.cf-keys{display:flex;gap:12px;font-family:var(--mono);font-size:12.5px;color:var(--dim)}
+.key{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.key b{display:inline-grid;place-items:center;width:22px;height:22px;border:1px solid var(--line);border-bottom-width:3px;border-radius:4px;color:var(--fg);font-weight:600;background:var(--panel)}
+.key.pressed{color:var(--op)}
+.key.pressed b{background:var(--op);border-color:var(--op);border-bottom-width:1px;color:var(--on-accent);transform:translateY(2px)}
+.nocred{position:absolute;left:1000px;top:148px;width:250px;padding:7px 10px;border:1.5px solid var(--ag);border-radius:6px;background:var(--ag-soft);font-family:var(--mono);font-size:12.5px;color:var(--fg);text-align:center;z-index:5}
+.steps{position:absolute;left:48px;top:604px;display:flex;align-items:center;gap:22px}
+.segs{display:flex;gap:7px}
+.seg{width:30px;height:30px;display:grid;place-items:center;border-radius:6px;font-family:var(--mono);font-size:14px;font-weight:600;border:1.5px solid var(--line);color:var(--faint)}
+.seg.op.done{background:var(--op-soft);border-color:var(--op);color:var(--op)}
+.seg.ag.done{background:var(--ag-soft);border-color:var(--ag);color:var(--ag)}
+.seg.op.now{background:var(--op);border-color:var(--op);color:var(--on-accent)}
+.seg.ag.now{background:var(--ag);border-color:var(--ag);color:var(--on-accent)}
+.step-txt{font-size:27px;font-weight:600;white-space:nowrap}
+.step-txt .op,.cap .op{color:var(--op)}
+.step-txt .ag,.cap .ag{color:var(--ag)}
+.step-txt code{font-family:var(--mono);font-size:24px;font-weight:500}
+
+/* captions */
+.cap{position:absolute;left:48px;top:604px;font-size:30px;font-weight:600;letter-spacing:-.01em;white-space:nowrap}
+.cap svg{display:inline-block;vertical-align:-2px;margin-right:12px}
+.cap.warn{color:var(--bad)}
+
+/* scene 6 */
+.own{position:absolute;left:320px;top:84px;width:640px;display:flex;flex-direction:column;gap:10px;z-index:4}
+.own-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.own .c{padding:13px 18px;background:var(--panel);border:1px solid var(--line);border-radius:6px;font-size:21px;font-weight:500}
+.own .c.l{border-left:3px solid var(--op)}
+.own .c.r{border-left:3px solid var(--ag)}
+.own-head .c.l,.own-head .c.r{background:transparent;border:0;padding:4px 2px 2px;font-size:14px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}
+.own-head .c.l{color:var(--op)}
+.own-head .c.r{color:var(--ag)}
+.own-head small{font-family:var(--mono);font-size:12px;font-weight:400;letter-spacing:0;text-transform:none;color:var(--dim);margin-left:8px}
+.own-shared{position:relative;display:flex;align-items:center;gap:16px;margin-top:6px;padding:15px 18px;border-radius:6px;background:var(--raise);border:1px solid var(--line);font-size:21px;font-weight:500}
+.own-shared::before{content:"";position:absolute;left:-1px;right:-1px;top:-1px;height:3px;border-radius:6px 6px 0 0;background:linear-gradient(90deg,var(--op) 0 50%,var(--ag) 50% 100%)}
+.own-shared .tag{font-size:13px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+.own-shared code{font-family:var(--mono);font-size:19px}
+
+/* scene 7 */
+.guards{position:absolute;left:0;top:0;width:1280px;height:720px;z-index:4}
+.guard{position:absolute;left:320px;width:640px;min-height:108px;padding:16px 20px;background:var(--panel);border:1px solid var(--line);border-radius:8px}
+.g-src{font-family:var(--mono);font-size:12.5px;color:var(--ag);margin-bottom:10px}
+.g-src.host{color:var(--dim)}
+.g-code{font-family:var(--mono);font-size:16px;color:var(--fg);white-space:pre}
+.g-code.diff{display:flex;flex-direction:column;gap:2px}
+.g-code .del{color:var(--dim)}
+.g-code .add{color:var(--fg)}
+.stamp{position:absolute;right:22px;top:50%;padding:6px 12px;border:2.5px solid var(--bad);border-radius:5px;color:var(--bad);background:var(--bad-soft);font-family:var(--mono);font-size:14px;font-weight:600;white-space:nowrap}
+.g-note{position:absolute;right:24px;bottom:9px;font-family:var(--mono);font-size:12px;color:var(--bad)}
+
+/* close */
+.endcard{position:absolute;left:0;top:32px;width:1280px;height:656px;background:var(--bg);display:flex;flex-direction:column;justify-content:center;align-items:flex-start;gap:22px;padding-left:150px;z-index:15}
+.ec-name{font-family:var(--mono);font-size:92px;font-weight:600;letter-spacing:-.03em;line-height:1}
+.ec-rule{display:flex;width:260px;height:4px;transform-origin:0 50%}
+.ec-rule i{flex:1}
+.ec-rule i.op{background:var(--op)}
+.ec-rule i.ag{background:var(--ag)}
+.ec-sub{font-family:var(--mono);font-size:26px;color:var(--fg)}
+.ec-tag{font-size:22px;color:var(--dim)}
+.ec-tag b{font-weight:600}
+.ec-tag b.op{color:var(--op)}
+.ec-tag b.ag{color:var(--ag)}
+
+.poster{position:absolute;left:0;top:32px;width:1280px;height:656px;z-index:30;border:0;margin:0;background:var(--scrim);color:var(--fg);display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:16px;padding:0 0 0 150px;cursor:pointer;font:inherit;text-align:left}
+.ps-name{font-family:var(--mono);font-size:84px;font-weight:600;letter-spacing:-.03em;line-height:1}
+.ps-sub{font-size:26px;color:var(--fg2)}
+.ps-sub b{font-weight:600}
+.ps-sub b.op{color:var(--op)}
+.ps-sub b.ag{color:var(--ag)}
+.ps-play{margin-top:20px;display:inline-flex;align-items:center;gap:14px;padding:16px 30px;border-radius:999px;background:var(--op);color:var(--on-accent);font-size:24px;font-weight:700}
+.poster:focus-visible .ps-play{outline:3px solid var(--fg);outline-offset:4px}
+
+/* ---------- player controls ---------- */
+.controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px 12px}
+.btn{font:inherit;font-size:.9rem;color:var(--fg);background:var(--raise);border:1px solid var(--line);border-radius:8px;padding:8px 12px;cursor:pointer;display:inline-flex;align-items:center;gap:8px;line-height:1.2}
+.btn:hover{border-color:var(--dim)}
+.btn:focus-visible{outline:2px solid var(--op);outline-offset:2px}
+.btn svg{width:16px;height:16px;flex:none}
+.btn.play{background:var(--op);border-color:var(--op);color:var(--on-accent);font-weight:600;min-width:100px;justify-content:center}
+.scrub{flex:1 1 220px;min-width:0;display:flex;align-items:center}
+.scrub input{width:100%;accent-color:var(--op);margin:0}
+.scrub input:focus-visible{outline:2px solid var(--op);outline-offset:4px}
+.time{font-family:var(--mono);font-size:.85rem;color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap}
+.scenes{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}
+.scenes button{width:100%;font:inherit;text-align:left;cursor:pointer;color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 12px;display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:baseline}
+.scenes button:hover{border-color:var(--dim)}
+.scenes button:focus-visible{outline:2px solid var(--op);outline-offset:2px}
+.scenes button[aria-current="true"]{border-color:var(--op);background:var(--raise)}
+.scenes .n{font-family:var(--mono);font-size:.8rem;color:var(--op)}
+.scenes .nm{font-size:.92rem;min-width:0}
+.scenes .tm{font-family:var(--mono);font-size:.75rem;color:var(--dim);font-variant-numeric:tabular-nums}
+.note{margin:0;color:var(--dim);font-size:.85rem}
+.note kbd{font-family:var(--mono);font-size:.8rem;padding:1px 6px;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;color:var(--fg)}
+</style>
+
+<div class="page">
+  <header class="head">
+    <h1>devops.bb</h1>
+    <p>An agent in a box, an operator at the keys. Explainer, 1:13.</p>
+  </header>
+
+  <div class="viewport" id="viewport">
+    <div class="stage" id="stage" role="img" aria-label="Animated explainer: devops.bb, an agent in a box and an operator at the keys. Eight scenes, 73 seconds.">
+      <div class="titlebar">
+        <span class="tb-name">devops.bb</span>
+        <span class="tb-sub">an agent in a box, an operator at the keys</span>
+        <span class="tb-scene" id="tbScene">1/8 · the problem</span>
+      </div>
+
+      <svg class="svg" viewBox="0 0 1280 720" width="1280" height="720" aria-hidden="true">
+        <defs><filter id="soft" x="-25%" y="-25%" width="150%" height="150%"><feGaussianBlur stdDeviation="7"/></filter></defs>
+        <g id="tsLines"></g>
+        <text id="tsLabel" class="ts-label" x="152" y="296">tailscale</text>
+
+        <g id="pipes">
+          <path id="pWork" class="pipe" pathLength="1" d="M135 462 V512 H1105 V462"/>
+          <path id="pWorkR" class="flow op" d="M131 462 V508 H1101 V462"/>
+          <path id="pWorkL" class="flow ag" d="M1109 462 V516 H139 V462"/>
+          <path id="pFeed" class="pipe" pathLength="1" d="M175 462 V552 H1145 V462"/>
+          <path id="pFeedF" class="flow op" d="M175 462 V552 H1145 V462"/>
+          <path id="hWorkL" class="pipe-head" d="M126 474 L135 462 L144 474"/>
+          <path id="hWorkR" class="pipe-head" d="M1096 474 L1105 462 L1114 474"/>
+          <path id="hFeed" class="pipe-head ag" d="M1136 474 L1145 462 L1154 474"/>
+          <line id="wbConn" class="conn" x1="640" y1="483" x2="640" y2="504"/>
+        </g>
+
+        <g id="blocked">
+          <line id="blkGhost" class="blk-ghost" x1="0" y1="0" x2="0" y2="0"/>
+          <line id="blkLine" class="blk-line" x1="0" y1="0" x2="0" y2="0"/>
+          <path id="blkHead" class="blk-head" d="M0 -6.5 L12 0 L0 6.5 Z"/>
+          <g id="barrier">
+            <line x1="0" y1="-22" x2="0" y2="22" class="bar"/>
+            <circle cx="0" cy="-38" r="11" class="bar-c"/>
+            <path d="M-4.5 -42.5 L4.5 -33.5 M4.5 -42.5 L-4.5 -33.5" class="bar-x"/>
+            <text x="-28" y="44" class="bar-t">blocked</text>
+          </g>
+        </g>
+
+        <g id="ringG"><circle id="ringAg" class="ring-ag" r="46"/><circle id="ringBad" class="ring-bad" r="46"/></g>
+        <g id="warnTri"><path class="warn-tri" d="M0 -14 L13 9 H-13 Z"/><path class="warn-mark" d="M0 -6 V1.5 M0 5 V5.2"/></g>
+
+        <g id="laptop">
+          <rect id="lapGlow" class="lap-glow" filter="url(#soft)" x="-162" y="-112" width="324" height="236" rx="16"/>
+          <rect class="lap-bezel" x="-150" y="-100" width="300" height="192" rx="10"/>
+          <rect class="lap-screen" x="-140" y="-90" width="280" height="172" rx="4"/>
+          <g id="scrA" class="scr">
+            <text x="-124" y="-58"><tspan class="p">~ $</tspan> ls -a ~</text>
+            <text x="-124" y="-34">.aws/     .ssh/</text>
+            <text x="-124" y="-10">.pgpass   .wrangler/</text>
+            <text x="-124" y="14"><tspan class="p">~ $</tspan></text>
+            <rect id="caretA" class="scr-caret" x="-91" y="3" width="8" height="15"/>
+          </g>
+          <g id="scrB" class="scr">
+            <text x="-124" y="-58"><tspan class="p">~ $</tspan> emacs workbook.org</text>
+            <text x="-124" y="-34" class="scr-dim">C-c C-c runs a block</text>
+            <text id="scrKey" x="-124" y="30" class="scr-key">r → run</text>
+          </g>
+          <path class="lap-base" d="M-182 92 H182 L171 112 H-171 Z"/>
+          <rect class="lap-notch" x="-26" y="92" width="52" height="5" rx="2"/>
+        </g>
+
+        <g id="boxG">
+          <rect id="boxGlow" class="box-glow" filter="url(#soft)" x="-137" y="-122" width="274" height="244" rx="14"/>
+          <path id="boxPath" class="box-wall" pathLength="1" d="M-117 -110 H117 Q125 -110 125 -102 V102 Q125 110 117 110 H-117 Q-125 110 -125 102 V-102 Q-125 -110 -117 -110 Z"/>
+          <g id="boxDeco">
+            <rect class="box-inner" x="-117" y="-102" width="234" height="204" rx="5"/>
+            <circle class="rivet" cx="-115" cy="-100" r="2.2"/>
+            <circle class="rivet" cx="115" cy="-100" r="2.2"/>
+            <circle class="rivet" cx="-115" cy="100" r="2.2"/>
+            <circle class="rivet" cx="115" cy="100" r="2.2"/>
+          </g>
+          <g id="lock">
+            <rect class="lock-bg" x="-12" y="-125" width="24" height="26" rx="4"/>
+            <path class="lock-shackle" d="M-4.5 -111 V-115 a4.5 4.5 0 0 1 9 0 V-111"/>
+            <rect class="lock-body" x="-7.5" y="-112" width="15" height="11" rx="2"/>
+          </g>
+        </g>
+
+        <circle id="dotOp" class="dot op" r="6" cx="0" cy="0"/>
+        <circle id="dotAg" class="dot ag" r="6" cx="0" cy="0"/>
+        <g id="feedDot"><circle class="dot op" r="7"/><text class="dot-t" x="0" y="-14">event</text></g>
+      </svg>
+
+      <div id="nodes"></div>
+      <div class="lane-lbl op" id="lapLbl">operator · host</div>
+      <div class="lane-lbl ag" id="boxLbl">agent · container</div>
+
+      <div class="pipe-lbl" id="wLbl" style="left:300px;top:512px"><b>/work</b>shared, both ways</div>
+      <div class="pipe-lbl" id="fLbl" style="left:300px;top:552px"><b>/feed</b>host → container only</div>
+      <div class="sink" id="sink" style="left:1040px;top:552px">the sink</div>
+
+      <div class="win" id="winL" style="left:335px">
+        <div class="win-bar"><i class="dot-i op"></i>host · terminal</div>
+        <div class="win-body"><div class="scroll" id="scrollL"></div></div>
+      </div>
+      <div class="win" id="winR" style="left:660px">
+        <div class="win-bar"><i class="dot-i ag"></i>agent · chat</div>
+        <div class="win-body"><div class="scroll" id="scrollR"></div></div>
+      </div>
+      <div id="snips"></div>
+      <div class="incident" id="incident"><span class="inc-k">incident:</span><span>dozens of blocks in quick succession.</span><span class="inc-n" id="incN">0 pastes</span></div>
+
+      <div class="wb" id="wb">
+        <div class="wb-bar"><span class="wb-tag">workbook</span><span class="wb-file">workbook.org</span><span class="wb-path">/work</span></div>
+        <div class="wb-hl" id="wbHl"></div>
+        <div class="wb-scan" id="wbScan"></div>
+        <div id="wbLines"></div>
+      </div>
+
+      <div class="boxin" id="boxin">
+        <div class="box-status" id="boxStatus"></div>
+        <div class="chips" id="chips">
+          <span class="chip">files<span class="lit">files</span></span>
+          <span class="chip">grep<span class="lit">grep</span></span>
+          <span class="chip">python<span class="lit">python</span></span>
+          <span class="chip">compile &amp; test<span class="lit">compile &amp; test</span></span>
+        </div>
+        <div class="bbcode" id="bbcode"></div>
+      </div>
+
+      <div class="agent" id="agent">
+        <svg viewBox="0 0 44 44" width="44" height="44" aria-hidden="true">
+          <rect x="7" y="7" width="30" height="30" rx="7" class="ag-body"/>
+          <path class="ag-pins" d="M15 2v5M22 2v5M29 2v5M15 37v5M22 37v5M29 37v5M2 15h5M2 22h5M2 29h5M37 15h5M37 22h5M37 29h5"/>
+          <path class="ag-spark" d="M22 13.5 L24.2 19.8 L30.5 22 L24.2 24.2 L22 30.5 L19.8 24.2 L13.5 22 L19.8 19.8 Z"/>
+        </svg>
+      </div>
+
+      <div class="confirm" id="confirm">
+        <div class="cf-top"><span>Run this sh block?</span><span class="cf-k">C-c C-c</span></div>
+        <div class="cf-warn"><svg width="14" height="13" viewBox="0 0 14 13" aria-hidden="true"><path d="M7 0.5 L13.5 12.5 H0.5 Z" fill="currentColor"/></svg>not run since attach</div>
+        <div class="cf-code">df -h</div>
+        <div class="cf-keys"><span class="key" id="keyR"><b>r</b>run</span><span class="key"><b>d</b>view diff</span><span class="key"><b>q</b>cancel</span></div>
+      </div>
+      <div class="nocred" id="nocred">no credential → agent does it</div>
+
+      <div class="own" id="own">
+        <div class="own-row own-head" id="row0"><div class="c l">Operator<small>host</small></div><div class="c r">Agent<small>container</small></div></div>
+        <div class="own-row" id="row1"><div class="c l">filesystem</div><div class="c r">coding</div></div>
+        <div class="own-row" id="row2"><div class="c l">CLIs &amp; credentials</div><div class="c r">file read/write</div></div>
+        <div class="own-row" id="row3"><div class="c l">every run</div><div class="c r">compile &amp; test</div></div>
+        <div class="own-shared" id="row4"><span class="tag">shared</span><span>the workbook · the <code>work/</code> directory</span></div>
+      </div>
+
+      <div class="guards" id="guards">
+        <div class="guard" id="g1" style="top:76px">
+          <div class="g-src">agent, inside the container</div>
+          <div class="g-code">$ touch /work/.envrc</div>
+          <div class="stamp" id="s1">refused: .envrc</div>
+          <div class="g-note" id="n1">↓ flagged in the mode line</div>
+        </div>
+        <div class="guard" id="g2" style="top:206px">
+          <div class="g-src">agent writes a block</div>
+          <div class="g-code">#+begin_src sh :dir (getenv "HOME")</div>
+          <div class="stamp" id="s2">refused: elisp in header</div>
+        </div>
+        <div class="guard" id="g3" style="top:336px">
+          <div class="g-src host">block edited after review</div>
+          <div class="g-code diff"><span class="del">- df -h</span><span class="add">+ df -h; cat ~/.aws/credentials</span></div>
+          <div class="stamp" id="s3">changed since review</div>
+        </div>
+      </div>
+
+      <div id="caps"></div>
+      <div class="steps" id="steps">
+        <div class="segs" id="segs"><span class="seg op">1</span><span class="seg ag">2</span><span class="seg op">3</span><span class="seg op">4</span><span class="seg ag">5</span><span class="seg ag">6</span></div>
+        <div class="step-txt" id="stepTxt"></div>
+      </div>
+
+      <div class="endcard" id="endcard">
+        <div class="ec-name" id="ecName">devops.bb</div>
+        <div class="ec-rule" id="ecRule"><i class="op"></i><i class="ag"></i></div>
+        <div class="ec-sub" id="ecSub">org-babel + babashka + a sandboxed agent</div>
+        <div class="ec-tag" id="ecTag">an <b class="ag">agent</b> in a box, an <b class="op">operator</b> at the keys</div>
+      </div>
+
+      <div class="modeline" id="modeline">
+        <span id="mlPre">-:---</span><span class="ml-buf" id="mlBuf">*scratch*</span><span id="mlMode">(Lisp Interaction)</span><span class="ml-sb" id="mlSb" hidden></span><span class="ml-right" id="mlPos">L1   All</span>
+      </div>
+
+      <button class="poster" id="poster" type="button" aria-label="Play the explainer from the start">
+        <span class="ps-name">devops.bb</span>
+        <span class="ps-sub">an <b class="ag">agent</b> in a box, an <b class="op">operator</b> at the keys</span>
+        <span class="ps-play"><svg width="20" height="22" viewBox="0 0 20 22" aria-hidden="true"><path d="M2 1.5 L18.5 11 L2 20.5 Z" fill="currentColor"/></svg>Play · 1:13</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="btn play" id="playBtn" type="button">
+      <svg id="icPlay" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 2 L13.5 8 L3.5 14 Z" fill="currentColor"/></svg>
+      <svg id="icPause" viewBox="0 0 16 16" aria-hidden="true" hidden><rect x="3" y="2" width="3.6" height="12" rx="1" fill="currentColor"/><rect x="9.4" y="2" width="3.6" height="12" rx="1" fill="currentColor"/></svg>
+      <span id="playLbl">Play</span>
+    </button>
+    <button class="btn" id="prevBtn" type="button" aria-label="Previous scene"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="2.5" width="2" height="11" rx="1" fill="currentColor"/><path d="M13.5 2.5 L5.5 8 L13.5 13.5 Z" fill="currentColor"/></svg></button>
+    <button class="btn" id="nextBtn" type="button" aria-label="Next scene"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="11.5" y="2.5" width="2" height="11" rx="1" fill="currentColor"/><path d="M2.5 2.5 L10.5 8 L2.5 13.5 Z" fill="currentColor"/></svg></button>
+    <div class="scrub"><input id="scrub" type="range" min="0" max="73000" step="10" value="0" aria-label="Playback position"></div>
+    <span class="time" id="time">0:00 / 1:13</span>
+    <button class="btn" id="fsBtn" type="button"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Full screen</button>
+  </div>
+  <ol class="scenes" id="scenes"></ol>
+  <p class="note"><kbd>Space</kbd> plays or pauses. <kbd>←</kbd> <kbd>→</kbd> move between scenes.</p>
+</div>
+
+<script>
+(function(){
+'use strict';
+var T_END = 73, POSTER_T = 51.3;
+var $ = function(id){ return document.getElementById(id); };
+function clamp(x,a,b){ return x<a?a:x>b?b:x; }
+function lerp(a,b,q){ return a+(b-a)*q; }
+function pr(t,a,b){ return clamp((t-a)/(b-a),0,1); }
+function eo(x){ return 1-Math.pow(1-x,3); }
+function eio(x){ return x<.5?4*x*x*x:1-Math.pow(-2*x+2,3)/2; }
+function win(t,a,b,fi,fo){
+  if(fi===undefined) fi=.35; if(fo===undefined) fo=.35;
+  if(t<a||t>b) return 0;
+  return Math.min(fi>0?pr(t,a,a+fi):1, fo>0?1-pr(t,b-fo,b):1);
+}
+function r2(x){ return Math.round(x*100)/100; }
+function r3(x){ return Math.round(x*1000)/1000; }
+function css(el,prop,val){ var c=el.__c||(el.__c={}); if(c[prop]!==val){ c[prop]=val; el.style[prop]=val; } }
+function at(el,name,val){ var c=el.__a||(el.__a={}); val=String(val); if(c[name]!==val){ c[name]=val; el.setAttribute(name,val); } }
+function tx(el,val){ if(el.__t!==val){ el.__t=val; el.textContent=val; } }
+function html(el,val){ if(el.__h!==val){ el.__h=val; el.innerHTML=val; } }
+function op(el,v){ v=r3(v); css(el,'opacity',String(v)); css(el,'visibility', v<=0.001?'hidden':'visible'); }
+function setClass(el,c){ if(el.__cn!==c){ el.__cn=c; el.setAttribute('class',c); } }
+
+var SCENES = [
+  {n:1,a:0, b:10,name:'the problem'},
+  {n:2,a:10,b:18,name:'the one idea'},
+  {n:3,a:18,b:24,name:'copy-paste'},
+  {n:4,a:24,b:32,name:'the shared workbook'},
+  {n:5,a:32,b:52,name:'the loop'},
+  {n:6,a:52,b:60,name:'who owns what'},
+  {n:7,a:60,b:68,name:'guard rails'},
+  {n:8,a:68,b:73,name:'close'}
+];
+function sceneIndex(t){ for(var i=SCENES.length-1;i>=0;i--){ if(t>=SCENES[i].a) return i; } return 0; }
+
+/* ---------- services ---------- */
+var ICON = {
+  cloud:'<path d="M7.5 18.5h9.2a3.8 3.8 0 0 0 .5-7.57A5.3 5.3 0 0 0 7 9.6a4.45 4.45 0 0 0 .5 8.9z"/>',
+  globe:'<circle cx="12" cy="12" r="8.2"/><ellipse cx="12" cy="12" rx="3.6" ry="8.2"/><path d="M3.8 12h16.4M5.2 8h13.6M5.2 16h13.6"/>',
+  branch:'<circle cx="7" cy="5.5" r="2.2"/><circle cx="7" cy="18.5" r="2.2"/><circle cx="17" cy="8" r="2.2"/><path d="M7 7.7v8.6M17 10.2c0 4-10 2.8-10 6"/>',
+  db:'<ellipse cx="12" cy="6" rx="7" ry="2.6"/><path d="M5 6v12c0 1.45 3.1 2.6 7 2.6s7-1.15 7-2.6V6M5 12c0 1.45 3.1 2.6 7 2.6s7-1.15 7-2.6"/>',
+  server:'<rect x="4" y="4" width="16" height="7" rx="1.6"/><rect x="4" y="13" width="16" height="7" rx="1.6"/><path d="M7.5 7.5h.01M7.5 16.5h.01M11 7.5h5M11 16.5h5"/>',
+  hex:'<path d="M12 3.2l7.6 4.4v8.8L12 20.8l-7.6-4.4V7.6z"/><circle cx="12" cy="12" r="2.6"/><path d="M12 6.4v3M12 14.6v3M7.2 9.2l2.6 1.5M14.2 13.3l2.6 1.5M7.2 14.8l2.6-1.5M14.2 10.7l2.6-1.5"/>',
+  deploy:'<rect x="4.5" y="4.5" width="15" height="15" rx="2.5"/><path d="M12 16V8.5M8.6 11.6L12 8.2l3.4 3.4"/>'
+};
+var NODES = [
+  {id:'aws',  label:'aws',        A:[165,150], B:[60,80],   at:.7,  icon:'cloud'},
+  {id:'cf',   label:'cloudflare', A:[330,95],  B:[155,80],  at:1.0, icon:'globe'},
+  {id:'gh',   label:'github',     A:[505,95],  B:[250,80],  at:1.3, icon:'branch'},
+  {id:'db',   label:'db',         A:[95,330],  B:[107,142], at:1.6, icon:'db'},
+  {id:'prod', label:'prod',       A:[165,505], B:[203,142], at:1.9, icon:'server'},
+  {id:'k8s',  label:'kubectl',    A:null,      B:[107,204], at:68.7,icon:'hex'},
+  {id:'vc',   label:'vercel',     A:null,      B:[203,204], at:69.2,icon:'deploy'}
+];
+var NS='http://www.w3.org/2000/svg';
+NODES.forEach(function(n){
+  var el=document.createElement('div'); el.className='node';
+  el.innerHTML='<div class="ring"></div><div class="g"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+ICON[n.icon]+'</svg></div><div class="lbl">'+n.label+'</div>';
+  $('nodes').appendChild(el);
+  n.el=el; n.g=el.querySelector('.g'); n.lbl=el.querySelector('.lbl'); n.ring=el.querySelector('.ring');
+  var ln=document.createElementNS(NS,'line'); ln.setAttribute('class','ts'); $('tsLines').appendChild(ln); n.line=ln;
+});
+
+/* ---------- workbook lines ---------- */
+var LINES = [
+  {txt:'#+title: workbook', a:24.3, c:'kw'},
+  {blank:true},
+  {txt:'* Disk usage', a:32.25, who:'op', c:'h'},
+  {txt:'Which of my filesystems are over 50% full?', type:[32.55,34.55], who:'op', caret:[32.5,35.0]},
+  {blank:true},
+  {txt:'#+begin_src sh', a:35.45, who:'ag', c:'kw'},
+  {txt:'df -h', type:[35.85,36.3], who:'ag', caret:[35.8,37.0], id:'b2'},
+  {txt:'#+end_src', a:36.55, who:'ag', c:'kw'},
+  {blank:true},
+  {txt:'#+RESULTS:', a:41.7, who:'res', c:'kw', dim8:true},
+  {txt:': Filesystem      Size  Used Avail Use% Mounted on', a:41.85, who:'res', c:'res', dim8:true},
+  {txt:': /dev/nvme0n1p2  234G  166G   56G  75% /', a:41.97, who:'res', c:'res', dim8:true},
+  {txt:': /dev/nvme1n1    932G  611G  321G  66% /var/lib/postgresql', a:42.09, who:'res', c:'res', dim8:true},
+  {txt:': tmpfs            16G  1.2G   15G   8% /run', a:42.21, who:'res', c:'res', dim8:true},
+  {txt:': /dev/nvme0n1p1  511M   61M  451M  12% /boot/efi', a:42.33, who:'res', c:'res', dim8:true},
+  {blank:true},
+  {txt:'** Summary', a:48.85, who:'ag', c:'h', dim8:true},
+  {txt:'Over 50%: / (75%), /var/lib/postgresql (66%).', type:[49.2,50.6], who:'ag', caret:[49.15,51.7], dim8:true}
+];
+var SWAPS = [[68.6,'kubectl get pods -A'],[69.4,'vercel logs --since 1h'],[70.2,'aws logs tail /prod/api']];
+LINES.forEach(function(ln,i){
+  if(ln.blank) return;
+  var el=document.createElement('div');
+  el.className='ln'+(ln.c?' '+ln.c:'');
+  el.style.top=(44+i*20)+'px';
+  var g=document.createElement('span'); g.className='gut'+(ln.who?' '+ln.who:''); if(!ln.who) g.style.display='none';
+  var s=document.createElement('span');
+  el.appendChild(g); el.appendChild(s);
+  if(ln.caret){ var c=document.createElement('span'); c.className='caret '+ln.who; el.appendChild(c); ln.caretEl=c; }
+  $('wbLines').appendChild(el);
+  ln.el=el; ln.t=s;
+});
+
+/* ---------- agent's babashka scratch ---------- */
+var BBL = [
+  {s:';; over50.bb', c:'cm', a:45.2},
+  {s:'(->> (parse-df results)', a:45.45},
+  {s:'     (filter #(> (:use %) 50))', a:45.75},
+  {s:'     (map :mount))', a:46.1},
+  {s:'$ bb test', c:'sh', a:46.75, instant:true},
+  {s:'✓ 4 passed', c:'ok', a:47.25, instant:true}
+];
+BBL.forEach(function(b){ var d=document.createElement('div'); if(b.c) d.className=b.c; $('bbcode').appendChild(d); b.el=d; });
+var CHIP_T=[12.3,12.65,13.0,13.35];
+var chipLits=[].slice.call(document.querySelectorAll('#chips .lit'));
+var STAT=[[12,'sealed'],[12.3,'local tools ready'],[14,'sealed'],[24.5,'idle'],[35,'writing a block…'],[36.9,'waiting on operator'],[43.6,'event on /feed'],[44.6,'reading output…'],[45.9,'running bb test'],[47.6,'tests pass'],[48.6,'writing summary…'],[50.9,'idle'],[60.2,'trying things…'],[66.6,'idle']];
+
+/* ---------- copy-paste scene ---------- */
+var LEFT_SCROLL = [
+  '<span class="p">$</span> aws ec2 describe-instances','{ "Reservations": [ …','<span class="p">$</span> kubectl -n prod get pods','api-7f9c  0/1  CrashLoopBackOff',
+  '<span class="p">$</span> psql -c "select now()"','<span class="e">ERROR: permission denied</span>','<span class="p">$</span> journalctl -u api -n 50','api[2210]: out of memory',
+  '<span class="p">$</span> df -h /var','/dev/nvme1n1  932G  66% /var','<span class="p">$</span> gh run view --log','<span class="e">Error: exit code 137</span>'
+];
+var RIGHT_SCROLL = [
+  '<span class="a">agent:</span> run this, paste it back','  aws ec2 describe-instances','<span class="p">you:</span> { "Reservations": [ …','<span class="a">agent:</span> now try',
+  '  kubectl -n prod get pods','<span class="p">you:</span> api-7f9c CrashLoopBackOff','<span class="a">agent:</span> can you paste the logs?','<span class="p">you:</span> api[2210]: out of memory',
+  '<span class="a">agent:</span> and this one','  psql -c "select now()"','<span class="p">you:</span> ERROR: permission denied','<span class="a">agent:</span> one more…'
+];
+$('scrollL').innerHTML=LEFT_SCROLL.concat(LEFT_SCROLL).join('\n');
+$('scrollR').innerHTML=RIGHT_SCROLL.concat(RIGHT_SCROLL).join('\n');
+var SNIP_TXT = [
+  '$ aws ec2 describe-instances','{ "Reservations": [ { "Instances…',
+  '$ kubectl -n prod get pods','api-7f9c   0/1   CrashLoopBackOff',
+  '$ kubectl -n prod logs api-7f9c','fatal: out of memory (137)',
+  '$ psql -c "select now()"','ERROR: permission denied',
+  '$ aws iam get-role --role-name api','AccessDenied: not authorized',
+  '$ df -h /var','/dev/nvme1n1  932G  611G  66%',
+  '$ journalctl -u api -n 200','…(2,431 more lines)',
+  '$ gh run view 18233 --log','Error: Process exited 137'
+];
+var seed=7; function rnd(){ seed=(seed*16807)%2147483647; return (seed-1)/2147483646; }
+var SN=[]; var st=18.8;
+SNIP_TXT.forEach(function(s,i){
+  var el=document.createElement('div'); el.className='snip '+(i%2===0?'cmd':'out'); el.textContent=s; $('snips').appendChild(el);
+  SN.push({el:el, cmd:i%2===0, st:st, px:640+(rnd()*160-80), py:490-i*6.5, rot:rnd()*28-14});
+  st+=0.27-0.011*i;
+});
+var LC=[477,212], RC=[802,212];
+
+/* ---------- steps + captions ---------- */
+var STEPS = [
+  {a:32,   who:'op', h:'The <span class="op">operator</span> asks.'},
+  {a:35,   who:'ag', h:'The <span class="ag">agent</span> writes a block.'},
+  {a:38,   who:'op', h:'The <span class="op">operator</span> reviews and runs it.'},
+  {a:41.6, who:'op', h:'Output lands. <code>/feed</code> tells the <span class="ag">agent</span>.'},
+  {a:44.6, who:'ag', h:'The <span class="ag">agent</span> checks it in the box.'},
+  {a:48.6, who:'ag', h:'The <span class="ag">agent</span> writes the summary.'}
+];
+var segs=[].slice.call(document.querySelectorAll('#segs .seg'));
+var WARN_SVG='<svg width="28" height="26" viewBox="0 0 28 26" aria-hidden="true"><path d="M14 1 L27 25 H1 Z" fill="currentColor"/><path d="M14 9 V16 M14 20 V20.2" stroke="var(--bg)" stroke-width="2.6" stroke-linecap="round"/></svg>';
+var CAPS = [
+  {a:1.2,  b:6.85,  h:'Our CLIs reach systems with sensitive data.'},
+  {a:7.0,  b:9.98,  h:WARN_SVG+'Built-in agent sandboxes are fragile.', c:'warn'},
+  {a:10.3, b:15.0,  h:'Run the <span class="ag">agent</span> on a separate machine or container.'},
+  {a:15.2, b:17.98, h:'…but the most useful work needs the outside world.'},
+  {a:22.7, b:24.85, h:'There’s a better way.'},
+  {a:25.0, b:31.9,  h:'One workbook. Two folders.'},
+  {a:52.4, b:59.85, h:'Who owns what.'},
+  {a:65.6, b:67.98, h:'The <span class="op">operator</span> is the boundary.'},
+  {a:68.3, b:70.9,  h:'Today: disk usage. Tomorrow: your runbooks, your incidents.'}
+];
+CAPS.forEach(function(c){ var d=document.createElement('div'); d.className='cap'+(c.c?' '+c.c:''); d.innerHTML=c.h; $('caps').appendChild(d); c.el=d; });
+
+var ROWS=[{id:'row0',a:52.5,split:true},{id:'row1',a:53.3,split:true},{id:'row2',a:54.1,split:true},{id:'row3',a:54.9,split:true},{id:'row4',a:56.0}];
+ROWS.forEach(function(r){ r.el=$(r.id); if(r.split){ r.l=r.el.children[0]; r.r=r.el.children[1]; } });
+var G=[{id:'g1',a:60.2,s:61.0,stamp:'s1',note:'n1'},{id:'g2',a:62.3,s:63.1,stamp:'s2'},{id:'g3',a:64.4,s:65.2,stamp:'s3'}];
+G.forEach(function(g){ g.el=$(g.id); g.st=$(g.stamp); g.nt=g.note?$(g.note):null; });
+
+/* ---------- element refs ---------- */
+var E={}; ['tbScene','laptop','lapGlow','scrA','scrB','caretA','scrKey','lapLbl','boxLbl','tsLabel','agent','ringG','ringAg','ringBad','warnTri',
+ 'boxG','boxPath','boxDeco','lock','boxGlow','boxin','boxStatus','chips','bbcode','blocked','blkGhost','blkLine','blkHead','barrier',
+ 'winL','winR','scrollL','scrollR','incident','incN','wb','wbHl','wbScan','pWork','pWorkR','pWorkL','pFeed','pFeedF','hWorkL','hWorkR','hFeed','wbConn',
+ 'wLbl','fLbl','sink','dotOp','dotAg','feedDot','confirm','keyR','nocred','steps','stepTxt','own','guards','endcard','ecName','ecRule','ecSub','ecTag',
+ 'mlPre','mlBuf','mlMode','mlSb','mlPos'].forEach(function(k){ E[k]=$(k); });
+var LEN_OP=555, LEN_AG=523, LEN_FEED=E.pFeedF.getTotalLength();
+var BS=[805,214], BE=[195,153], BANG=Math.atan2(BE[1]-BS[1],BE[0]-BS[0])*180/Math.PI;
+
+function render(t){
+  var L=eio(pr(t,18,19));
+  var si=sceneIndex(t), sc=SCENES[si];
+  tx(E.tbScene, sc.n+'/8 · '+sc.name);
+
+  /* laptop (operator, host) */
+  var lapIn=eo(pr(t,0,.7));
+  var lx=lerp(400,155,L), ly=lerp(310,335,L), lsc=lerp(1,.7,L)*lerp(.9,1,lapIn);
+  at(E.laptop,'transform','translate('+r2(lx)+' '+r2(ly)+') scale('+r3(lsc)+')');
+  op(E.laptop,lapIn);
+  var opGlow=Math.max(win(t,32.3,34.9,.25,.4),win(t,40.2,41.5,.1,.5),win(t,65.6,68.1,.4,.3),.5*win(t,52.5,59.7,.4,.4));
+  op(E.lapGlow,opGlow*.7);
+  op(E.scrA,1-pr(t,22.8,23.3)); op(E.scrB,pr(t,23.3,23.9));
+  op(E.caretA,((t*1.7)%1)<.55?1:0);
+  op(E.scrKey,win(t,40.25,41.1,.05,.3));
+  css(E.lapLbl,'transform','translate('+r2(lx)+'px,428px) translateX(-50%)'); op(E.lapLbl,lapIn);
+
+  /* services + tailscale lines */
+  var arrowVis=win(t,14.2,17.95,.15,.5);
+  NODES.forEach(function(n){
+    var vis=eo(pr(t,n.at,n.at+.4)), k=n.A?L:1;
+    var x=n.A?lerp(n.A[0],n.B[0],L):n.B[0], y=n.A?lerp(n.A[1],n.B[1],L):n.B[1];
+    var S=lerp(56,28,k)*lerp(.55,1,vis);
+    css(n.el,'transform','translate('+r2(x)+'px,'+r2(y)+'px)'); op(n.el,vis);
+    var sp=r2(S)+'px'; css(n.g,'width',sp); css(n.g,'height',sp);
+    css(n.lbl,'top',r2(S/2+6)+'px'); css(n.lbl,'fontSize',r2(lerp(13,11,k))+'px');
+    if(n.id==='aws'){ var rs=r2(S+18)+'px'; css(n.ring,'width',rs); css(n.ring,'height',rs); op(n.ring,arrowVis*(.55+.45*Math.sin(t*6))); }
+    else op(n.ring,0);
+    var f=eo(pr(t,n.at+.1,n.at+.7));
+    at(n.line,'x1',r2(lx)); at(n.line,'y1',r2(ly)); at(n.line,'x2',r2(lerp(lx,x,f))); at(n.line,'y2',r2(lerp(ly,y,f)));
+    op(n.line,f>0?.6:0); at(n.line,'stroke-dashoffset',r2(-t*14));
+  });
+  op(E.tsLabel,win(t,2.4,18.6,.4,.5));
+
+  /* agent + container box */
+  var bx=lerp(930,1125,L), by=310;
+  var boxIn=eo(pr(t,10,10.9));
+  var ax,ay,as=1;
+  if(t<10.6){ var q=eo(pr(t,4.6,6.6)); ax=lerp(1370,720,q); ay=300+Math.sin(t*2.6)*3*q*(1-pr(t,9.8,10.5)); }
+  else { var q2=eio(pr(t,10.6,11.8)); ax=lerp(720,bx-87,q2); ay=lerp(300,by-74,q2); as=lerp(1,.82,q2); }
+  css(E.agent,'transform','translate('+r2(ax-22)+'px,'+r2(ay-22)+'px) scale('+r3(as)+')');
+  op(E.agent,t<4.55?0:1);
+
+  var ringVis=win(t,4.7,11.1,.5,.45), warn=pr(t,7,7.25);
+  at(E.ringG,'transform','translate('+r2(ax)+' '+r2(ay)+') rotate('+r2((t*28)%360)+')');
+  op(E.ringAg,ringVis*(1-warn));
+  var flick=t>7?(.5+.5*Math.abs(Math.sin(t*17)))*(Math.sin(t*5.3)>-.6?1:.25):1;
+  op(E.ringBad,ringVis*warn*flick);
+  at(E.warnTri,'transform','translate('+r2(ax+40)+' '+r2(ay-46)+') scale('+r3(lerp(.4,1,eo(pr(t,7,7.25))))+')');
+  op(E.warnTri,win(t,7,10.5,.2,.35));
+
+  at(E.boxG,'transform','translate('+r2(bx)+' '+by+') scale('+r3(lerp(.92,1,boxIn))+')');
+  op(E.boxG,Math.min(1,boxIn*4));
+  at(E.boxPath,'stroke-dashoffset',r3(1-boxIn));
+  op(E.boxDeco,pr(t,10.6,11.1)*.8);
+  var lk=eo(pr(t,11.7,12.0));
+  at(E.lock,'transform','translate(0 -110) scale('+r3(lerp(1.8,1,lk))+') translate(0 110)'); op(E.lock,lk);
+  var agBusy=Math.max(win(t,35,36.9,.2,.3),win(t,44.6,47.6,.2,.3),win(t,48.6,50.9,.2,.3),win(t,43.6,44.4,.08,.3),.6*win(t,12.2,13.8,.2,.4),.5*win(t,52.5,59.7,.4,.4));
+  op(E.boxGlow,agBusy*.7);
+  css(E.boxin,'transform','translate('+r2(bx-125)+'px,'+(by-110)+'px)'); op(E.boxin,pr(t,10.6,11.2));
+  css(E.boxLbl,'transform','translate('+r2(bx)+'px,428px) translateX(-50%)'); op(E.boxLbl,boxIn);
+  var stt=''; STAT.forEach(function(s){ if(t>=s[0]) stt=s[1]; }); tx(E.boxStatus,stt);
+
+  var codeVis=win(t,45.0,51.8,.3,.4);
+  op(E.chips,1-codeVis); op(E.bbcode,codeVis);
+  chipLits.forEach(function(el,i){ op(el,pr(t,CHIP_T[i],CHIP_T[i]+.25)); });
+  BBL.forEach(function(b){
+    var n=b.instant?(t>=b.a?b.s.length:0):Math.round(b.s.length*pr(t,b.a,b.a+.28));
+    tx(b.el,b.s.slice(0,n)||' ');
+  });
+
+  /* scene 2: blocked reach */
+  op(E.blocked,arrowVis);
+  if(arrowVis>0){
+    var fa=eo(pr(t,14.2,14.85))*.215;
+    var tipx=lerp(BS[0],BE[0],fa), tipy=lerp(BS[1],BE[1],fa);
+    if(t>=14.85){ tipx+=Math.abs(Math.sin((t-14.85)*30))*Math.exp(-(t-14.85)*5)*9; }
+    at(E.blkLine,'x1',BS[0]); at(E.blkLine,'y1',BS[1]); at(E.blkLine,'x2',r2(tipx)); at(E.blkLine,'y2',r2(tipy));
+    at(E.blkLine,'stroke-dashoffset',r2(t*30));
+    at(E.blkHead,'transform','translate('+r2(tipx)+' '+r2(tipy)+') rotate('+r2(BANG)+')');
+    var g0=.255; at(E.blkGhost,'x1',r2(lerp(BS[0],BE[0],g0))); at(E.blkGhost,'y1',r2(lerp(BS[1],BE[1],g0))); at(E.blkGhost,'x2',BE[0]); at(E.blkGhost,'y2',BE[1]);
+    op(E.blkGhost,pr(t,14.9,15.4)*.9);
+    var bp=eo(pr(t,14.78,15.0));
+    at(E.barrier,'transform','translate('+r2(lerp(BS[0],BE[0],.236))+' '+r2(lerp(BS[1],BE[1],.236))+') scale('+r3(lerp(.3,1,bp))+')');
+    op(E.barrier,pr(t,14.78,14.88));
+  }
+
+  /* scene 3: copy-paste */
+  var wv=win(t,18.4,23.5,.4,.45);
+  [E.winL,E.winR].forEach(function(w){ op(w,wv); css(w,'transform','translateY('+r2((1-eo(pr(t,18.4,18.9)))*14)+'px)'); });
+  var dtw=Math.max(0,t-18.4), off=(dtw*30+dtw*dtw*7)%216;
+  css(E.scrollL,'transform','translateY('+(-r2(off))+'px)');
+  css(E.scrollR,'transform','translateY('+(-r2((off*1.1+90)%216))+'px)');
+  var iv=win(t,19,23.3,.3,.35);
+  op(E.incident,iv); css(E.incident,'transform','translate(-50%,-50%) scale('+r3(lerp(.88,1,eo(pr(t,19,19.3))))+')');
+  tx(E.incN,Math.round(37*Math.pow(pr(t,18.8,22.3),.9))+' pastes');
+  SN.forEach(function(s,i){
+    if(t<s.st||t>23.2){ op(s.el,0); return; }
+    var from=s.cmd?RC:LC, to=s.cmd?LC:RC;
+    var f=pr(t,s.st,s.st+.45), g=pr(t,s.st+.45,s.st+.8), x,y,r=0;
+    if(f<1){ x=lerp(from[0],to[0],eio(f)); y=lerp(from[1],to[1],f)-Math.sin(Math.PI*f)*95; r=lerp(0,s.rot*.4,f); }
+    else { x=lerp(to[0],s.px,eo(g)); y=lerp(to[1],s.py,g*g); r=lerp(s.rot*.4,s.rot,g); }
+    var c=eio(pr(t,22.4+i*.012,22.95+i*.012));
+    x=lerp(x,640,c); y=lerp(y,266,c); r+=c*90*(i%2?1:-1);
+    css(s.el,'transform','translate('+r2(x)+'px,'+r2(y)+'px) translate(-50%,-50%) rotate('+r2(r)+'deg) scale('+r3(lerp(1,.12,c))+')');
+    op(s.el,Math.min(pr(t,s.st,s.st+.08),1-pr(t,22.8+i*.012,23.05+i*.012)));
+  });
+
+  /* workbook */
+  var wbo=0, wbs=1;
+  if(t>=23.4){ var gw=eo(pr(t,23.4,24.4)); wbo=gw; wbs=lerp(.06,1,gw); }
+  if(t>=52){ wbo=lerp(1,0,pr(t,52,52.6)); wbs=lerp(1,.97,pr(t,52,52.6)); }
+  if(t>=67.95){ var gb=eo(pr(t,67.95,68.5)); wbo=gb; wbs=lerp(.97,1,gb); }
+  op(E.wb,wbo); css(E.wb,'transform','scale('+r3(wbs)+')');
+  var dim8=1-.72*pr(t,68.5,68.9);
+  var swapDip=Math.max(win(t,SWAPS[0][0]-.15,SWAPS[0][0]+.15,.15,.15),win(t,SWAPS[1][0]-.15,SWAPS[1][0]+.15,.15,.15),win(t,SWAPS[2][0]-.15,SWAPS[2][0]+.15,.15,.15));
+  LINES.forEach(function(ln){
+    if(ln.blank) return;
+    var s=ln.txt, vis, o;
+    if(ln.type){ vis=t>=ln.type[0]; s=ln.txt.slice(0,Math.round(ln.txt.length*pr(t,ln.type[0],ln.type[1]))); o=vis?1:0; }
+    else { vis=t>=ln.a; o=vis?pr(t,ln.a,ln.a+.15):0; }
+    if(ln.id==='b2'){ for(var w=0;w<SWAPS.length;w++){ if(t>=SWAPS[w][0]) s=SWAPS[w][1]; } o*=1-.9*swapDip; }
+    if(ln.dim8) o*=dim8;
+    tx(ln.t,s); op(ln.el,o);
+    if(ln.caretEl){
+      var co=0;
+      if(t>=ln.caret[0]&&t<ln.caret[1]){ co=(t<ln.type[1]+.05)?1:((((t-ln.type[1])*1.8)%1)<.6?1:0); }
+      op(ln.caretEl,co);
+    }
+  });
+  op(E.wbHl,Math.max(win(t,38.1,41.45,.2,.3),win(t,68.4,70.85,.2,.2)));
+  css(E.wbScan,'top',r2(lerp(244,324,pr(t,44.75,45.85)))+'px'); op(E.wbScan,win(t,44.7,46.0,.12,.2));
+
+  /* folders */
+  var pw=eo(pr(t,25,26.2)), pf=eo(pr(t,26.2,27.4));
+  at(E.pWork,'stroke-dashoffset',r3(1-pw)); op(E.pWork,pw>0?1:0);
+  at(E.pFeed,'stroke-dashoffset',r3(1-pf)); op(E.pFeed,pf>0?1:0);
+  var fw=pr(t,26,26.5), ff=pr(t,27.2,27.7);
+  op(E.pWorkR,fw*.9); op(E.pWorkL,fw*.9); op(E.pFeedF,ff);
+  at(E.pWorkR,'stroke-dashoffset',r2(-t*24)); at(E.pWorkL,'stroke-dashoffset',r2(-t*24)); at(E.pFeedF,'stroke-dashoffset',r2(-t*30));
+  op(E.hWorkL,pr(t,25.9,26.2)); op(E.hWorkR,pr(t,25.9,26.2)); op(E.hFeed,pr(t,27.2,27.4));
+  op(E.wbConn,pr(t,26,26.4)*Math.min(1,wbo*1.4));
+  op(E.wLbl,pr(t,25.5,25.9)); op(E.fLbl,pr(t,26.7,27.1));
+  var sk=eo(pr(t,27.3,27.6)); op(E.sink,sk); css(E.sink,'transform','translate(-50%,-50%) scale('+r3(lerp(1.5,1,sk))+')');
+
+  var p1, q3;
+  q3=eio(pr(t,32.3,33.3)); p1=E.pWorkR.getPointAtLength(q3*LEN_OP);
+  at(E.dotOp,'cx',r2(p1.x)); at(E.dotOp,'cy',r2(p1.y)); op(E.dotOp,win(t,32.3,33.4,.1,.15));
+  var va, qa;
+  if(t<42){ qa=eio(pr(t,35,35.9)); va=win(t,35,36,.1,.15); } else { qa=eio(pr(t,48.6,49.5)); va=win(t,48.6,49.6,.1,.15); }
+  p1=E.pWorkL.getPointAtLength(qa*LEN_AG);
+  at(E.dotAg,'cx',r2(p1.x)); at(E.dotAg,'cy',r2(p1.y)); op(E.dotAg,va);
+  p1=E.pFeedF.getPointAtLength(eio(pr(t,42.5,43.8))*LEN_FEED);
+  at(E.feedDot,'transform','translate('+r2(p1.x)+' '+r2(p1.y)+')'); op(E.feedDot,win(t,42.5,43.95,.1,.2));
+
+  /* scene 5: confirm, tag, step counter */
+  op(E.confirm,win(t,38.3,41.2,.25,.3));
+  css(E.confirm,'transform','scale('+r3(lerp(.94,1,eo(pr(t,38.3,38.6))))+')');
+  E.keyR.classList.toggle('pressed',t>=40.25&&t<40.8);
+  op(E.nocred,win(t,47,51.8,.3,.4)); css(E.nocred,'transform','translateY('+r2(lerp(10,0,eo(pr(t,47,47.3))))+'px)');
+  op(E.steps,win(t,32,51.95,.3,.3));
+  var k=-1; STEPS.forEach(function(s,i){ if(t>=s.a) k=i; });
+  segs.forEach(function(el,i){ var base='seg '+STEPS[i].who; setClass(el,i<k?base+' done':i===k?base+' now':base); });
+  if(k>=0){ html(E.stepTxt,STEPS[k].h); op(E.stepTxt,pr(t,STEPS[k].a,STEPS[k].a+.25)); }
+
+  /* scene 6 */
+  op(E.own,win(t,52.4,60.35,.4,.45));
+  ROWS.forEach(function(r){
+    var e=eo(pr(t,r.a,r.a+.4)); op(r.el,e);
+    if(r.split){ css(r.l,'transform','translateX('+r2(lerp(-28,0,e))+'px)'); css(r.r,'transform','translateX('+r2(lerp(28,0,e))+'px)'); }
+    else css(r.el,'transform','scale('+r3(lerp(.94,1,e))+')');
+  });
+
+  /* scene 7 */
+  op(E.guards,win(t,60.0,68.0,.3,.4));
+  G.forEach(function(g,i){
+    var e=eo(pr(t,g.a,g.a+.35)), nx=G[i+1];
+    var dv=nx?lerp(1,.55,pr(t,nx.a,nx.a+.3)):1; dv=lerp(dv,1,pr(t,65.7,66.1));
+    var sh=t>=g.s?Math.sin((t-g.s)*55)*Math.exp(-(t-g.s)*9)*5:0;
+    op(g.el,e*dv); css(g.el,'transform','translate('+r2(sh)+'px,'+r2(lerp(16,0,e))+'px)');
+    op(g.st,pr(t,g.s,g.s+.08)); css(g.st,'transform','translateY(-50%) rotate(-6deg) scale('+r3(lerp(1.9,1,eo(pr(t,g.s,g.s+.16))))+')');
+    if(g.nt) op(g.nt,pr(t,g.s+.3,g.s+.6));
+  });
+
+  /* close */
+  op(E.endcard,eo(pr(t,70.8,71.4)));
+  var en=eo(pr(t,71,71.5));
+  op(E.ecName,en); css(E.ecName,'transform','translateY('+r2(lerp(14,0,en))+'px)');
+  var er=eo(pr(t,71.3,71.8)); op(E.ecRule,er); css(E.ecRule,'transform','scaleX('+r3(er)+')');
+  op(E.ecSub,pr(t,71.5,71.9)); op(E.ecTag,pr(t,71.8,72.2));
+
+  /* captions */
+  CAPS.forEach(function(c){
+    var v=win(t,c.a,c.b,.35,.3); op(c.el,v);
+    css(c.el,'transform','translateY('+r2((1-eo(pr(t,c.a,c.a+.35)))*10)+'px)');
+  });
+
+  /* mode line */
+  if(t<27.9){ tx(E.mlPre,'-:---'); tx(E.mlBuf,'*scratch*'); tx(E.mlMode,'(Lisp Interaction)'); E.mlSb.hidden=true; tx(E.mlPos,'L1   All'); }
+  else {
+    tx(E.mlPre,t>=32.2?'-:**-':'-:---'); tx(E.mlBuf,'workbook.org'); tx(E.mlMode,'(Org)'); E.mlSb.hidden=false;
+    if(t>=61.0&&t<62.9){ tx(E.mlSb,'sandbox: refused /work/.envrc'); setClass(E.mlSb,'ml-sb bad'); }
+    else { tx(E.mlSb,'sandbox: trial'); setClass(E.mlSb,(t<29.2&&(((t-27.9)*2.5)%1)<.6)?'ml-sb flash':'ml-sb'); }
+    var pos=t<32.2?'L2':t<35.4?'L4':t<41.6?'L7':t<48.6?'L15':'L18';
+    tx(E.mlPos,pos+'  All');
+  }
+}
+
+/* ---------- player ---------- */
+var viewport=$('viewport'), stage=$('stage'), poster=$('poster');
+var playBtn=$('playBtn'), scrub=$('scrub'), timeEl=$('time');
+var t=POSTER_T, playing=false, last=null;
+function fit(){
+  var w=viewport.clientWidth, h=viewport.clientHeight; if(!w||!h) return;
+  var s=Math.min(w/1280,h/720), ox=(w-1280*s)/2, oy=(h-720*s)/2;
+  stage.style.transform='translate('+r2(ox)+'px,'+r2(oy)+'px) scale('+s+')';
+}
+if(window.ResizeObserver) new ResizeObserver(fit).observe(viewport); else window.addEventListener('resize',fit);
+fit();
+
+var sceneList=$('scenes'), sceneBtns=[];
+function fmt(x){ x=Math.max(0,Math.floor(x)); return Math.floor(x/60)+':'+String(x%60).padStart(2,'0'); }
+SCENES.forEach(function(s,i){
+  var li=document.createElement('li'), b=document.createElement('button');
+  b.type='button';
+  b.innerHTML='<span class="n">'+s.n+'</span><span class="nm">'+s.name.charAt(0).toUpperCase()+s.name.slice(1)+'</span><span class="tm">'+fmt(s.a)+'</span>';
+  b.addEventListener('click',function(){ seek(s.a+.001); play(); });
+  li.appendChild(b); sceneList.appendChild(li); sceneBtns.push(b);
+});
+
+var lastUI={};
+function syncUI(){
+  var v=String(Math.round(t*1000)); if(lastUI.v!==v){ lastUI.v=v; scrub.value=v; }
+  var ts=fmt(t)+' / '+fmt(T_END); if(lastUI.ts!==ts){ lastUI.ts=ts; timeEl.textContent=ts; }
+  var si=poster.hidden?sceneIndex(t):-1;
+  if(lastUI.si!==si){ lastUI.si=si; sceneBtns.forEach(function(b,i){ b.setAttribute('aria-current',i===si?'true':'false'); }); }
+  var lab=playing?'Pause':(t>=T_END-.01?'Replay':'Play');
+  if(lastUI.lab!==lab){ lastUI.lab=lab; $('playLbl').textContent=lab; $('icPlay').hidden=playing; $('icPause').hidden=!playing; }
+}
+function draw(){ render(t); syncUI(); }
+function frame(now){
+  if(!playing){ last=null; return; }
+  if(last===null) last=now;
+  var dt=Math.min(.1,(now-last)/1000); last=now;
+  t+=dt; if(t>=T_END){ t=T_END; playing=false; }
+  draw();
+  if(playing) requestAnimationFrame(frame);
+}
+function hidePoster(){ if(!poster.hidden){ poster.hidden=true; } }
+function play(){
+  if(!poster.hidden){ hidePoster(); t=0; }
+  if(t>=T_END-.01) t=0;
+  if(playing) return;
+  playing=true; last=null; syncUI(); requestAnimationFrame(frame);
+}
+function pause(){ playing=false; syncUI(); }
+function toggle(){ if(playing) pause(); else play(); }
+function seek(x){ hidePoster(); t=clamp(x,0,T_END); draw(); }
+function jump(d){ var i=sceneIndex(t); if(d<0&&t-SCENES[i].a>1.2) d=0; i=clamp(i+d,0,SCENES.length-1); seek(SCENES[i].a+.001); }
+
+playBtn.addEventListener('click',toggle);
+poster.addEventListener('click',play);
+$('prevBtn').addEventListener('click',function(){ jump(-1); });
+$('nextBtn').addEventListener('click',function(){ jump(1); });
+scrub.addEventListener('input',function(){ seek(Number(scrub.value)/1000); });
+$('fsBtn').addEventListener('click',function(){
+  try{
+    if(document.fullscreenElement){ var x=document.exitFullscreen&&document.exitFullscreen(); if(x&&x.catch) x.catch(function(){}); }
+    else if(viewport.requestFullscreen){ var y=viewport.requestFullscreen(); if(y&&y.catch) y.catch(function(){}); }
+  }catch(e){}
+});
+document.addEventListener('fullscreenchange',function(){ setTimeout(fit,50); });
+document.addEventListener('keydown',function(e){
+  var tag=(e.target&&e.target.tagName||'').toLowerCase();
+  if(e.key===' '||e.key==='k'){
+    if(tag==='button'&&e.key===' ') return;
+    e.preventDefault(); toggle();
+  } else if(tag!=='input'){
+    if(e.key==='ArrowRight'){ e.preventDefault(); jump(1); }
+    else if(e.key==='ArrowLeft'){ e.preventDefault(); jump(-1); }
+  }
+});
+window.__seek=function(x){ playing=false; seek(x); };
+render(t); syncUI();
+})();
+</script>
+
+</body></html>

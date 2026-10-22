@@ -1,0 +1,461 @@
+#+TARGET: kpassapk  ~/src/github.com/kpassapk
+#+TARGET: repo      ~/src/github.com/kpassapk/bb-slug
+#+TARGET: workbook  ~/active/bb-slug/accents
+#+TARGET: box       /podman:box-slug:
+#+PROPERTY: header-args:sh :results output
+
+* Intro
+
+In [[file:getting_started.org][getting_started.org]] we used a workbook as a way for the agent to
+ask to run commands on your machine via org-babel source code
+blocks. This is useful in an incident, or when performing a discovery
+task that may involve external systems.
+
+=devops.bb= uses a similar mechanism to transport project code from
+the sandbox to your machine.
+
+Let's see how, through an example.
+
+The repository is [[https://github.com/kpassapk/bb-slug][bb-slug]], one Babashka function, =slugify=, that turns
+a title into a slug. It drops accented letters: ="Año Nuevo"= becomes
+="a-o-nuevo"=. The task is to fold them, so it becomes ="ano-nuevo"=.
+
+The task a heading in a workbook /outside/ the repository.
+
+#+begin_example
+~/active/bb-slug/accents/work.org   * TODO Fold accents   :BRANCH: accents   :BASE: main
+#+end_example
+
+The heading's =:REPO:= names the checkout; devops-bb never looks for the
+repo where the workbook is. (Here you write the file by hand. Making it
+from a =work/= file in the repo, running several at once, and copying it
+back when the task is done, is aly-root's job, not devops.bb's.)
+
+The heading gets a git worktree, a container and an attach. The agent
+never sees your checkout, your worktree or your =.git= (hooks and config
+in it run code). The repo travels as a /bundle/, a single file of git
+objects and refs, through the workbook's directory:
+
+1. You seed =bb-slug.bundle= into the workbook's directory.
+2. The agent clones it into its own copy in the container, edits, tests
+   and commits there, and bundles its new commits back.
+3. You fetch that into =refs/sandbox/*=, read the commits, and only
+   then move your branch. ("land" the commits.)
+4. You push. It is the one step that needs a credential, so it is a
+   block you run.
+
+Midway, =main= moves under the task, as it does when someone else
+merges, and the agent rebases onto it.
+
+The workbook is not part of the PR: it is not in the repo at all. The
+agent never commits under the repo's own =work/= either (its tools and
+yours refuse).
+
+Who owns what:
+
+*Operator*:
+- your checkout, the worktree, seeding, landing, the push
+
+*Agent*:
+- its clone in the container: edits, =bb test=, commits, the outgoing
+  bundle
+
+*Both*:
+- the workbook, and the bundle files beside it
+
+The steps use the =devops-bb= tasks =worktree add=, =worktree seed=,
+=worktree land=, =worktree status= (you) and =repo clone=, =repo
+handoff=, =repo rebase= (the agent). =devops-bb= is =bin/devops-bb= of
+this repo, on your =PATH=.
+
+#+begin_quote
+Status: the push notice that shows the commit log, and the fingerprint
+over the bundle's commit SHAs (spec PR 11), are not built yet. Until
+then, read the log with =worktree land= before you run a push block.
+#+end_quote
+
+* Setup                                                            :kpassapk:
+
+Do the build, Emacs and sandbox-sink steps of
+[[file:getting_started.org][getting_started.org]] first (the image =devops-bb-sandbox=, Emacs with
+=ob-confirm-posframe-mode=). Rebuild the image if it is older than this
+guide: it has the =repo-*= tasks and the skill.
+
+Check out bb-slug:
+
+#+begin_src sh
+  git clone git@github.com:kpassapk/bb-slug.git
+#+end_src
+
+* Inspect the project                                                  :repo:
+
+#+begin_src sh :wrap src bb
+  cat src/slug/core.clj
+#+end_src
+
+#+RESULTS:
+#+begin_src bb
+(ns slug.core
+  "Slugs for titles, as in a URL or a file name."
+  (:require
+   [clojure.string :as str]))
+
+(defn slugify
+  "TITLE as a slug: lower case, every run of characters other than a-z
+  and 0-9 one dash, and no dash at either end."
+  [title]
+  (-> (str/lower-case title)
+      (str/replace #"[^a-z0-9]+" "-")
+      (str/replace #"^-|-$" "")))
+#+end_src
+
+#+begin_src sh
+  bb test
+#+end_src
+
+#+RESULTS:
+: Testing slug.core-test
+: 
+: Ran 1 tests containing 3 assertions.
+: 0 failures, 0 errors.
+
+#+begin_src sh
+  bb -cp src -e "(require 'slug.core) (slug.core/slugify \"Año Nuevo\")"
+#+end_src
+
+#+RESULTS:
+: "a-o-nuevo"
+
+Expected: one test, three assertions, no failures; then ="a-o-nuevo"=.
+
+* Create the workbook                                              :workbook:
+
+#+begin_src org :tangle work.org :mkdirp yes
+  #+TITLE: bb-slug: accents
+  #+PROPERTY: header-args:sh :results output
+
+  * TODO Fold accents
+  :PROPERTIES:
+  :REPO:   ~/src/github.com/kpassapk/bb-slug
+  :BRANCH: accents
+  :BASE:   main
+  :END:
+
+  =slugify= drops accented letters: "Año Nuevo" becomes "a-o-nuevo".
+  Fold each to its base letter (é to e, ñ to n), so it becomes
+  "ano-nuevo". Add tests, run =bb test=, and commit.
+#+end_src
+
+The heading does not say what happens to a letter with no base letter
+(ß, ø), on purpose: see what the agent decides, and whether its Result
+says so.
+
+* Worktree and container                                               :repo:
+
+#+begin_src sh
+  devops-bb worktree add --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
+#+end_src
+
+#+RESULTS:
+: /Users/kyle/src/github.com/kpassapk/bb-slug-accents
+
+#+begin_src sh
+  devops-bb worktree status --workbook ~/active/bb-slug/accents/work.org
+#+end_src
+
+#+RESULTS:
+: accents                  on main              0 commits  seed none    /Users/kyle/src/github.com/kpassapk/bb-slug-accents
+
+Expected: the path =.../bb-slug-accents=, then one row: =accents on
+main=, =0 commits=, =seed none= and the worktree.
+
+Start a container on the workbook's directory, as in getting_started
+(the same =-e ANTHROPIC_API_KEY=, or log in):
+
+#+begin_src sh :results silent
+  podman run -d --name box-slug -v $HOME/active/bb-slug/accents:/work:rw localhost/devops-bb-sandbox
+#+end_src
+
+#+begin_src sh
+podman ps | grep box-slug
+#+end_src
+
+#+RESULTS:
+: 0d4d36fbb596  localhost/devops-bb-sandbox:latest    sleep infinity  16 seconds ago  Up 16 seconds                                                                box-slug
+
+Add the sink, then attach the workbook in Emacs, from its own buffer
+with =M-x devops-bb-sandbox-attach=:
+
+#+begin_src elisp :results none
+  (setq devops-bb-sandbox-sinks
+        '(("slug" :via "podman exec -i -u root box-slug" :to "/feed"
+           :map (("/Users/kyle/active/bb-slug/accents" . "/work")))))
+  (find-file "~/active/bb-slug/accents/work.org")
+  (devops-bb-sandbox-attach "slug" "accents")
+#+end_src
+
+The mode line should say =sandbox: accents=.
+
+* The task                                                             :repo:
+
+Seed the bundle, beside the workbook:
+
+#+begin_src sh
+  devops-bb worktree seed --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
+#+end_src
+
+#+RESULTS:
+: /Users/kyle/active/bb-slug/accents/bb-slug.bundle (base at aee48bc)
+
+Expected: =~/active/bb-slug/accents/bb-slug.bundle (base at <sha>)=. It
+is a regular file, which the workbook directory allows.
+
+** Claude                                                               :box:
+
+With point in the block below, try =devops-run-in-terminal=
+
+#+begin_src sh
+  claude
+#+end_src
+
+Prompt:
+
+#+begin_example
+  Use the devops-bb-sandbox skill. Do the heading "Fold accents" in
+  /work/work.org.
+#+end_example
+
+The "what" is the heading, and the "how" is the skill.
+
+What to look for:
+- Claude runs =devops-bb status=, then =repo clone --heading "Fold
+  accents"=, and reads =slugify= in its own clone. It writes no block:
+  all of it is uncredentialed.
+- It runs =bb test= itself, with =git --no-pager=, and commits
+  =src/slug/core.clj= and its test, and nothing under the repo's
+  =work/=. Then it runs =repo handoff= and says which branch the bundle
+  holds.
+- It adds a =** Result= under the heading, after checking =modified=. It
+  does not try to push.
+- It does not use a REPL or =clj=: the image has Babashka only.
+
+* Main moves                                                           :repo:
+
+Before you land, someone else's change reaches =main=. Make it by hand,
+in your checkout, which has =main= checked out:
+
+#+begin_src sh :results silent
+  printf '\nSlugs are ASCII: a-z, 0-9 and dashes.\n' >> README.md
+  git commit -qam "Say what a slug may hold"
+#+end_src
+
+=accents= is now behind its base. =worktree status= says so, as =seed
+stale=:
+
+#+begin_src sh
+  devops-bb worktree status --workbook ~/active/bb-slug/accents/work.org
+#+end_src
+
+#+RESULTS:
+: accents                  on main              0 commits  seed stale   /Users/kyle/src/github.com/kpassapk/bb-slug-accents
+
+Send the new base tip over, beside the workbook, where the container
+sees it:
+
+#+begin_src sh
+  devops-bb worktree seed --rebase --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
+#+end_src
+
+#+RESULTS:
+: /Users/kyle/active/bb-slug/accents/bb-slug.base.bundle (base at b8c7f8f)
+
+Tell Claude:
+
+#+begin_example
+main moved. /work/bb-slug.base.bundle has its new tip.
+#+end_example
+
+What to look for:
+- It runs =devops-bb repo rebase --heading "Fold accents"=, and not its
+  own =git rebase=: it reports =accents rebased onto <sha>=. A conflict
+  is listed by file; Claude resolves it and runs =repo rebase
+  --continue=.
+- It runs =bb test= again, then =repo handoff=.
+
+* Land                                                                 :repo:
+
+Fetch and read, which moves nothing:
+
+#+begin_src sh
+  devops-bb worktree status --workbook ~/active/bb-slug/accents/work.org
+#+end_src
+
+#+RESULTS:
+: accents                  on main              0 commits  seed current /Users/kyle/src/github.com/kpassapk/bb-slug-accents
+
+
+#+begin_src sh
+  devops-bb worktree land --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
+#+end_src
+
+#+RESULTS:
+#+begin_example
+== accents (ff)
+aab6cb7 Fold accented letters to their base letter in slugify
+
+ src/slug/core.clj       | 17 +++++++++++++----
+ test/slug/core_test.clj |  7 +++++++
+ 2 files changed, 20 insertions(+), 4 deletions(-)
+b8c7f8f Say what a slug may hold
+
+ README.md | 2 ++
+ 1 file changed, 2 insertions(+)
+
+nothing moved; --apply to fast-forward
+#+end_example
+
+Expected: === accents (ff)=, then the log with a stat: the agent's
+commits to =src/slug/core.clj= and its test, and under them main's
+README commit, since your =accents= is still at the old main. Nothing
+moved.
+=transfer.fsckObjects= checked every object, and nothing under
+=refs/heads= changed. The commits are the container's (author "Claude
+(sandbox)") and unsigned; a repo that requires signed commits needs a
+re-sign before the push.
+
+Read the change itself:
+
+#+begin_src sh :wrap src diff
+  git --no-pager diff main refs/sandbox/accents -- src test
+#+end_src
+
+#+RESULTS:
+#+begin_src diff
+diff --git a/src/slug/core.clj b/src/slug/core.clj
+index 401d4ef..5480f87 100644
+--- a/src/slug/core.clj
++++ b/src/slug/core.clj
+@@ -1,12 +1,21 @@
+ (ns slug.core
+   "Slugs for titles, as in a URL or a file name."
+   (:require
+-   [clojure.string :as str]))
++   [clojure.string :as str])
++  (:import
++   (java.text Normalizer Normalizer$Form)))
++
++(defn- fold-accents
++  "S with each accented letter folded to its base letter: é to e, ñ to n."
++  [s]
++  (-> (Normalizer/normalize s Normalizer$Form/NFD)
++      (str/replace #"\p{M}+" "")))
+ 
+ (defn slugify
+-  "TITLE as a slug: lower case, every run of characters other than a-z
+-  and 0-9 one dash, and no dash at either end."
++  "TITLE as a slug: accents folded, lower case, every run of characters
++  other than a-z and 0-9 one dash, and no dash at either end."
+   [title]
+-  (-> (str/lower-case title)
++  (-> (fold-accents title)
++      (str/lower-case)
+       (str/replace #"[^a-z0-9]+" "-")
+       (str/replace #"^-|-$" "")))
+diff --git a/test/slug/core_test.clj b/test/slug/core_test.clj
+index 0e99fbe..130619e 100644
+--- a/test/slug/core_test.clj
++++ b/test/slug/core_test.clj
+@@ -7,3 +7,10 @@
+   (is (= "hello-world" (slug/slugify "Hello, World!")))
+   (is (= "release-2-0" (slug/slugify "  Release 2.0  ")))
+   (is (= "" (slug/slugify "!!!"))))
++
++(deftest slugify-accents-test
++  (is (= "ano-nuevo" (slug/slugify "Año Nuevo")))
++  (is (= "cafe-creme" (slug/slugify "Café Crème")))
++  (is (= "senor-munoz" (slug/slugify "SEÑOR MUÑOZ")))
++  (is (= "uber-naive" (slug/slugify "Über naïve")))
++  (is (= "ano-nuevo" (slug/slugify "Año Nuevo")) "already decomposed"))
+#+end_src
+
+If you like it, move the branch, in its worktree, which has it checked
+out (uncommitted edits there stay):
+
+#+begin_src sh
+  devops-bb worktree land --apply --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
+#+end_src
+
+#+RESULTS:
+#+begin_example
+== accents (ff)
+aab6cb7 Fold accented letters to their base letter in slugify
+
+ src/slug/core.clj       | 17 +++++++++++++----
+ test/slug/core_test.clj |  7 +++++++
+ 2 files changed, 20 insertions(+), 4 deletions(-)
+b8c7f8f Say what a slug may hold
+
+ README.md | 2 ++
+ 1 file changed, 2 insertions(+)
+#+end_example
+
+#+begin_src sh
+  devops-bb worktree status --workbook ~/active/bb-slug/accents/work.org
+#+end_src
+
+#+RESULTS:
+: accents                  on main              1 commits  seed current /Users/kyle/src/github.com/kpassapk/bb-slug-accents
+
+Expected: =accents on main=, its commits, =seed current=.
+
+* Push (optional)                                                      :repo:
+
+The push is the one step that needs a credential, so it is a block you
+run. You need write access to the remote; otherwise skip this, or push
+to your own fork.
+
+#+begin_src sh :eval never-export
+  git push origin accents
+  gh pr create --head accents --base main --title "Fold accents" --body "Written in a sandbox."
+#+end_src
+
+* Try to break it
+
+Run these from a second terminal.
+
+- Put a repo in the workbook directory: =podman exec box-slug git clone
+  ~/bb-slug /work/bb-slug=. The mode line says sandbox: SUSPENDED (a
+  =.git= is a dot-path) and runs are refused. Remove it.
+- Have Claude commit a file under the repo's =work/= in its clone. =repo
+  handoff= refuses: "commits touch work/". If a bundle with one gets to
+  the host anyway (=git bundle create= by hand), =worktree land= refuses
+  it too.
+- Plant a hook in the clone: =echo 'touch /tmp/pwned' >
+  ~/bb-slug/.git/hooks/post-checkout=, then hand off and land. The hook
+  is not in the bundle, and =/tmp/pwned= does not exist on your host.
+- Ask Claude to push. It has no credentials, and the push fails in the
+  container (=podman exec box-slug ls ~/.ssh ~/.config/gh= finds
+  neither).
+- Edit the same line of =slugify= on =main= by hand, re-seed with
+  =--rebase= and have Claude run =repo rebase=. It exits 2 and names the
+  file.
+
+* Clean up                                                         :kpassapk:
+
+#+begin_src sh
+  podman rm -f box-slug
+#+end_src
+
+#+RESULTS:
+: box-slug
+
+Remove worktree, reset =bb-slug= to =origin/main=
+
+#+begin_src sh :results silent
+  cd bb-slug
+  git worktree remove --force ../bb-slug-accents
+  git branch -D accents
+  git reset -q --hard origin/main
+  git for-each-ref --format='%(refname)' refs/sandbox refs/devops | xargs -n1 git update-ref -d
+  rm -rf ~/active/bb-slug
+#+end_src

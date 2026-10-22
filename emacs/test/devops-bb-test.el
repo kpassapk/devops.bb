@@ -584,6 +584,37 @@ The entry names the session from the target the run resolved."
             (let ((kill-buffer-query-functions nil))
               (kill-buffer buf))))))))
 
+(ert-deftest devops-bb-async-var-not-rerun-test ()
+  "An async result does not run the block's :var dependencies again."
+  (let ((devops-enable-session-async t))
+    (devops-bb-test--with-local-target target
+      (let ((session (car (devops-target-sessions target))))
+        (unwind-protect
+            (devops-bb-test--with-org
+                (format (concat "#+TARGET: %s (local)\n\n"
+                                "* Run\t\t:local:\n\n"
+                                "#+name: foo\n#+begin_src elisp\n"
+                                "(cl-incf devops-bb-test--runs)\n#+end_src\n\n"
+                                "#+begin_src sh :var foo=foo\necho hi\n#+end_src\n")
+                        target)
+              (defvar devops-bb-test--runs 0)
+              (setq devops-bb-test--runs 0)
+              (goto-char (point-min))
+              (re-search-forward "begin_src sh")
+              (let ((org-confirm-babel-evaluate nil))
+                (org-babel-execute-src-block)
+                (let ((deadline (+ (float-time) 30)))
+                  (while (and (< (float-time) deadline)
+                              (not (save-excursion
+                                     (re-search-forward "^: hi" nil t))))
+                    (accept-process-output nil 0.2))))
+              (should (save-excursion (goto-char (point-min))
+                                      (re-search-forward "^: hi" nil t)))
+              (should (= devops-bb-test--runs 1)))
+          (when-let* ((buf (get-buffer session)))
+            (let ((kill-buffer-query-functions nil))
+              (kill-buffer buf))))))))
+
 (ert-deftest devops-bb-log-async-output-uuid-test ()
   "A result is logged with its own run's ID, whatever its output prints.
 The second block prints the first run's ID, which is in the session."
@@ -985,7 +1016,7 @@ Detach closes stdin and undoes the attach."
         (should (equal out `((session) (status . "done") (id . ,(alist-get 'id run))
                              (input . "(+ 1 2)") (output . "3"))))
         (should (equal (mapcar (lambda (l) (alist-get 'event l)) (cdr lines))
-                       '("modify" "execute" "revert")))))))
+                       '("save" "execute" "revert")))))))
 
 (ert-deftest devops-bb-sandbox-attach-via-test ()
   "A :via sink passes its command, and its :to as is, to the publisher."
@@ -1119,7 +1150,8 @@ base stays attached."
           (org-narrow-to-subtree)
           (should (string-match-p "sandbox: wb" (devops-bb-sandbox--mode-line)))
           (should (equal (devops-bb-test--run-block) 3)))
-        (should (with-current-buffer buf (buffer-modified-p)))
+        ;; The save is of the base buffer, whose file holds the result.
+        (should-not (with-current-buffer buf (buffer-modified-p)))
         (let ((kill-buffer-query-functions nil))
           (kill-buffer indirect)))
       (should (devops-bb-sandbox-attachment buf))
@@ -1285,7 +1317,7 @@ the run and `attached' false."
           (should (equal (alist-get 'feed status) "wb"))
           (should (equal (alist-get 'workbook status) file))
           (should (equal (mapcar (lambda (e) (alist-get 'event e)) events)
-                         '("modify" "execute")))
+                         '("save" "execute")))
           (should (equal (mapcar (lambda (e) (alist-get 'seq e)) events) '(1 2)))
           (should (equal (alist-get 'output
                                     (car (devops-bb-test--json-lines
@@ -1426,6 +1458,33 @@ prompts once, with the diff; `d' shows all of it."
         (should calls)
         (should (equal (delete-dups calls) '("emacs-lisp")))
         (should (= 1 (length devops-bb-test--prompts)))))))
+
+(ert-deftest devops-bb-review-save-result-test ()
+  "A run in an attached buffer saves it as the result lands.  When Claude
+wrote the file meanwhile, nothing is saved or asked, and Claude's file stays."
+  (devops-bb-test--with-workbook (root buf devops-bb-test--named-block)
+    (let ((file (buffer-file-name)))
+      (devops-bb-test--execute-at "begin_src")
+      (should-not (buffer-modified-p))
+      (should (string-match-p "#\\+RESULTS" (with-temp-buffer
+                                              (insert-file-contents file)
+                                              (buffer-string))))
+      ;; The operator edits, then Claude writes: the run is not saved.
+      (goto-char (point-max))
+      (insert "operator\n")
+      (devops-bb-test--claude-writes file (concat devops-bb-test--named-block "\nclaude\n"))
+      (let ((devops-bb-review-save-results t))
+        (devops-bb-test--execute-at "begin_src"))
+      (should (buffer-modified-p))
+      (should (string-suffix-p "claude\n" (with-temp-buffer
+                                            (insert-file-contents file)
+                                            (buffer-string))))
+      ;; Switched off, it never saves.
+      (revert-buffer t t)
+      (insert "operator\n")
+      (let ((devops-bb-review-save-results nil))
+        (devops-bb-test--execute-at "begin_src"))
+      (should (buffer-modified-p)))))
 
 (defconst devops-bb-test--plants
   '(("own :var" "* Run\n\n#+begin_src emacs-lisp :var x=(setq devops-bb-test--pwned 1)\nx\n#+end_src\n"
