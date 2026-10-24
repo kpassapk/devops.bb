@@ -31,7 +31,8 @@ repo where the workbook is. (Here you write the file by hand. Making it
 from a =work/= file in the repo, running several at once, and copying it
 back when the task is done, is aly-root's job, not devops.bb's.)
 
-The heading gets a git worktree, a container and an attach. The agent
+The heading gets a container and an attach, and here a git worktree,
+to run the branch on the host (optional: landing needs none). The agent
 never sees your checkout, your worktree or your =.git= (hooks and config
 in it run code). The repo travels as a /bundle/, a single file of git
 objects and refs, through the workbook's directory:
@@ -54,7 +55,7 @@ yours refuse).
 Who owns what:
 
 *Operator*:
-- your checkout, the worktree, seeding, landing, the push
+- your checkout, the worktree if any, seeding, landing, the push
 
 *Agent*:
 - its clone in the container: edits, =bb test=, commits, the outgoing
@@ -63,15 +64,15 @@ Who owns what:
 *Both*:
 - the workbook, and the bundle files beside it
 
-The steps use the =devops-bb= tasks =worktree add=, =worktree seed=,
-=worktree land=, =worktree status= (you) and =repo clone=, =repo
-handoff=, =repo rebase= (the agent). =devops-bb= is =bin/devops-bb= of
+The steps use the =devops-bb= tasks =bundle seed=, =bundle land=,
+=bundle status= (you) and =repo clone=, =repo handoff=, =repo rebase=
+(the agent). =devops-bb= is =bin/devops-bb= of
 this repo, on your =PATH=.
 
 #+begin_quote
 Status: the push notice that shows the commit log, and the fingerprint
 over the bundle's commit SHAs (spec PR 11), are not built yet. Until
-then, read the log with =worktree land= before you run a push block.
+then, read the log with =bundle land= before you run a push block.
 #+end_quote
 
 * Setup                                                            :kpassapk:
@@ -152,22 +153,22 @@ says so.
 
 * Worktree and container                                               :repo:
 
+A worktree is yours, a plain git one; =bundle land= moves the branch
+in it. Skip it and =land= makes the branch, or moves it, without one.
+
 #+begin_src sh
-  devops-bb worktree add --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
+  git worktree add -q -b accents ../bb-slug-accents main
 #+end_src
 
-#+RESULTS:
-: /Users/kyle/src/github.com/kpassapk/bb-slug-accents
-
 #+begin_src sh
-  devops-bb worktree status --workbook ~/active/bb-slug/accents/work.org
+  devops-bb bundle status --workbook ~/active/bb-slug/accents/work.org
 #+end_src
 
 #+RESULTS:
 : accents                  on main              0 commits  seed none    /Users/kyle/src/github.com/kpassapk/bb-slug-accents
 
-Expected: the path =.../bb-slug-accents=, then one row: =accents on
-main=, =0 commits=, =seed none= and the worktree.
+Expected: one row: =accents on main=, =0 commits=, =seed none= and the
+worktree.
 
 Start a container on the workbook's directory, as in getting_started
 (the same =-e ANTHROPIC_API_KEY=, or log in):
@@ -201,7 +202,7 @@ The mode line should say =sandbox: accents=.
 Seed the bundle, beside the workbook:
 
 #+begin_src sh
-  devops-bb worktree seed --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
+  devops-bb bundle seed --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
 #+end_src
 
 #+RESULTS:
@@ -249,11 +250,11 @@ in your checkout, which has =main= checked out:
   git commit -qam "Say what a slug may hold"
 #+end_src
 
-=accents= is now behind its base. =worktree status= says so, as =seed
+=accents= is now behind its base. =bundle status= says so, as =seed
 stale=:
 
 #+begin_src sh
-  devops-bb worktree status --workbook ~/active/bb-slug/accents/work.org
+  devops-bb bundle status --workbook ~/active/bb-slug/accents/work.org
 #+end_src
 
 #+RESULTS:
@@ -263,7 +264,7 @@ Send the new base tip over, beside the workbook, where the container
 sees it:
 
 #+begin_src sh
-  devops-bb worktree seed --rebase --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
+  devops-bb bundle seed --rebase --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
 #+end_src
 
 #+RESULTS:
@@ -287,7 +288,7 @@ What to look for:
 Fetch and read, which moves nothing:
 
 #+begin_src sh
-  devops-bb worktree status --workbook ~/active/bb-slug/accents/work.org
+  devops-bb bundle status --workbook ~/active/bb-slug/accents/work.org
 #+end_src
 
 #+RESULTS:
@@ -295,7 +296,7 @@ Fetch and read, which moves nothing:
 
 
 #+begin_src sh
-  devops-bb worktree land --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
+  devops-bb bundle land --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
 #+end_src
 
 #+RESULTS:
@@ -382,7 +383,7 @@ If you like it, move the branch, in its worktree, which has it checked
 out (uncommitted edits there stay):
 
 #+begin_src sh
-  devops-bb worktree land --apply --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
+  devops-bb bundle land --apply --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
 #+end_src
 
 #+RESULTS:
@@ -400,7 +401,7 @@ b8c7f8f Say what a slug may hold
 #+end_example
 
 #+begin_src sh
-  devops-bb worktree status --workbook ~/active/bb-slug/accents/work.org
+  devops-bb bundle status --workbook ~/active/bb-slug/accents/work.org
 #+end_src
 
 #+RESULTS:
@@ -428,7 +429,7 @@ Run these from a second terminal.
   =.git= is a dot-path) and runs are refused. Remove it.
 - Have Claude commit a file under the repo's =work/= in its clone. =repo
   handoff= refuses: "commits touch work/". If a bundle with one gets to
-  the host anyway (=git bundle create= by hand), =worktree land= refuses
+  the host anyway (=git bundle create= by hand), =bundle land= refuses
   it too.
 - Plant a hook in the clone: =echo 'touch /tmp/pwned' >
   ~/bb-slug/.git/hooks/post-checkout=, then hand off and land. The hook

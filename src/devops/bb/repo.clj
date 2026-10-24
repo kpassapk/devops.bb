@@ -18,8 +18,9 @@
     NAME.base.bundle  the same, again, when BASE has moved
     NAME.out.bundle   what Claude hands back: every branch with new commits
 
-  In the sandbox: `clone!', `handoff!', `rebase!'.  On the host: `add!',
-  `seed!', `land!', `status'.  The host never runs git in Claude's clone,
+  In the sandbox: `clone!', `handoff!', `rebase!'.  On the host: `seed!',
+  `land!', `status'.  None needs a worktree; `land!' respects one that has
+  the branch checked out.  The host never runs git in Claude's clone,
   and fetches what Claude hands back only into refs/sandbox/*."
   (:require
    [babashka.fs :as fs]
@@ -257,18 +258,6 @@
                  (when br [br path]))))
        (into {})))
 
-(defn add!
-  "Make the heading's worktree, a sibling of the checkout (or --path), on
-  BRANCH cut from BASE.  {:path}"
-  [opts]
-  (let [{:keys [top branch base name]} (host-task opts)
-        path (str (fs/absolutize (fs/expand-home
-                                  (or (:path opts) (fs/path (fs/parent top) (str name "-" branch))))))]
-    (if (rev top (str "refs/heads/" branch))
-      (git top "worktree" "add" "-q" path branch)
-      (git top "worktree" "add" "-q" "-b" branch path base))
-    {:path path}))
-
 (defn- ahead [top from to] (parse-long (git top "rev-list" "--count" (str from ".." to))))
 
 (defn land!
@@ -315,10 +304,10 @@
 
 (defn status
   "One map per heading with a :BRANCH:, in order, over every workbook
-  --workbook names (once or more): its worktree, its commits over BASE,
-  whether it was seeded from the base's current tip (:seed is :none,
-  :current or :stale), and how many commits the agent handed back that
-  are not landed.  Each heading's repo is its own :REPO:, or --repo."
+  --workbook names (once or more): the worktree that has it checked out,
+  if any, its commits over BASE, whether it was seeded from the base's
+  current tip (:seed is :none, :current or :stale), and how many commits
+  the agent handed back that are not landed.  Each heading's repo is its own :REPO:, or --repo."
   [opts]
   (let [wbs (let [w (:workbook opts)] (if (sequential? w) w [w]))]
     (vec
@@ -384,14 +373,7 @@
                unchanged (println "base unchanged")
                :else     (println (str rebased " rebased onto " (short onto)))))))
 
-(defn wt-add
-  "Add the heading's worktree"
-  {:org.babashka/cli {:spec (assoc heading-spec :path {:desc "Default: beside the checkout, as NAME-BRANCH"})
-                      :require [:workbook :heading]}}
-  [opts]
-  (run add! opts (fn [{:keys [path]}] (println path))))
-
-(defn wt-seed
+(defn bundle-seed
   "Bundle the branches for the agent; --rebase when the base has moved"
   {:org.babashka/cli {:spec (assoc heading-spec :rebase {:desc "Write NAME.base.bundle"
                                                          :coerce :boolean})
@@ -400,7 +382,7 @@
   (run seed! opts (fn [{:keys [bundle base-sha]}]
                     (println (str bundle " (base at " (short base-sha) ")")))))
 
-(defn wt-land
+(defn bundle-land
   "Fetch what the agent handed back into refs/sandbox/*; --apply fast-forwards"
   {:org.babashka/cli {:spec (assoc heading-spec :apply {:desc "Fast-forward branches, make new ones"
                                                         :coerce :boolean})
@@ -414,10 +396,10 @@
          (when-not (:apply opts)
            (println "\nnothing moved; --apply to fast-forward"))
          (when (some #(= :diverged (:state %)) rs)
-           (println "diverged: worktree seed --rebase, then the agent runs repo rebase")
+           (println "diverged: bundle seed --rebase, then the agent runs repo rebase")
            (System/exit 2)))))
 
-(defn wt-status
+(defn bundle-status
   "The workbooks' headings with a :BRANCH:, and where each stands"
   {:org.babashka/cli {:spec {:workbook {:desc "A workbook; once per workbook" :coerce []}
                              :repo     {:desc "Overrides every heading's :REPO:"}}
