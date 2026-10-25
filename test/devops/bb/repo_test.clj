@@ -1,6 +1,6 @@
 (ns devops.bb.repo-test
   "The core/API loop, with real git in a temp dir: two headings, each in
-  a workbook of its own outside the checkout, two worktrees, an agent's
+  a workbook of its own outside the checkout, two operator worktrees, an agent's
   clone that fixes core from the API's side, a base that moves, and a
   rebase."
   (:require
@@ -38,6 +38,14 @@
     (spit (str f) (str "#+TITLE: " dir "\n" (heading title branch base top)))
     (str f)))
 
+(defn- worktree!
+  "The operator's own worktree for BRANCH, cut from BASE, beside TOP as
+  NAME-BRANCH.  Its path."
+  [top branch base]
+  (let [path (str (fs/path (fs/parent top) (str (fs/file-name top) "-" branch)))]
+    (git top "worktree" "add" "-q" "-b" branch path base)
+    path))
+
 (defn- fixture
   "A checkout `atomstream', with its own workbooks committed under work/,
   in a temp dir."
@@ -54,8 +62,8 @@
   (let [{:keys [root top]} (fixture)
         core-wb (workbook! root "core" "Core model" "core" "main" top)
         api-wb  (workbook! root "api" "API" "api" "core" top)
-        core   (:path (repo/add! {:workbook core-wb :heading "Core"}))
-        api    (:path (repo/add! {:workbook api-wb :heading "API"}))
+        core   (worktree! top "core" "main")
+        api    (worktree! top "api" "core")
         todos  (str (fs/path api "work/todos.org"))
         agent  (str (fs/path root "agent-api"))]
     (is (= "atomstream-core" (str (fs/file-name core))))
@@ -117,11 +125,31 @@
       (is (= (git agent "rev-parse" "api") (git top "rev-parse" "api")))
       (is (= "edited, uncommitted\n" (slurp todos))))))
 
+(deftest no-worktree-test
+  (let [{:keys [root top]} (fixture)
+        api-wb (workbook! root "api" "API" "api" "main" top)
+        agent (str (fs/path root "agent"))
+        land  #(into {} (map (juxt :branch :state)) (repo/land! {:workbook api-wb :heading "API" :apply true}))]
+    (repo/seed! {:workbook api-wb :heading "API"})
+    (repo/clone! {:workbook api-wb :heading "API" :dir agent})
+    (commit! agent "src/api.clj" "api\n" "api: handlers")
+    (repo/handoff! {:workbook api-wb :heading "API" :dir agent})
+    (testing "land makes the branch, which nothing has checked out"
+      (is (= {"api" :new} (land)))
+      (is (= (git agent "rev-parse" "api") (git top "rev-parse" "api"))))
+    (testing "and moves it, with no worktree to move it in"
+      (commit! agent "src/api.clj" "api v2\n" "api: v2")
+      (repo/handoff! {:workbook api-wb :heading "API" :dir agent})
+      (is (= {"api" :ff} (land)))
+      (is (= (git agent "rev-parse" "api") (git top "rev-parse" "api")))
+      (is (= "main" (git top "branch" "--show-current")))
+      (is (nil? (:worktree (first (repo/status {:workbook api-wb}))))))))
+
 (deftest rebase-conflict-test
   (let [{:keys [root top]} (fixture)
         api-wb (workbook! root "api" "API" "api" "main" top)
         agent (str (fs/path root "agent"))]
-    (repo/add! {:workbook api-wb :heading "API"})
+    (worktree! top "api" "main")
     (repo/seed! {:workbook api-wb :heading "API" :base "main"})
     (repo/clone! {:workbook api-wb :heading "API" :base "main" :dir agent})
     (commit! agent "src/model.clj" "agent\n" "agent edit")
@@ -139,7 +167,7 @@
   (let [{:keys [root top]} (fixture)
         api-wb (workbook! root "api" "API" "api" "main" top)
         agent (str (fs/path root "agent"))]
-    (repo/add! {:workbook api-wb :heading "API"})
+    (worktree! top "api" "main")
     (repo/seed! {:workbook api-wb :heading "API" :base "main"})
     (repo/clone! {:workbook api-wb :heading "API" :base "main" :dir agent})
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"nothing to hand off"
