@@ -1,0 +1,57 @@
+#+TITLE: Status counts rebased commits as unlanded
+#+FILETAGS: :sandbox:
+#+CATEGORY: work
+#+TARGET: devops_bb ~/src/github.com/kpassapk/devops.bb
+#+LINK:   root      ~/src/github.com/kpassapk/root
+
+* TODO Plan
+:PROPERTIES:
+:ID:       3C490E35-8FE2-464F-857C-F5F7C6B742DD
+:END:
+
+Found on 2026-10-25, in root's =sandboxes= workbook (task =FC91BB8C=,
+branch =filesystem=).
+
+After =bb sandbox land --id=fc91 --apply= made =filesystem=, the branch
+was rebased onto the new tip of =sandboxes=.  =bb sandbox status= then
+showed =1 unlanded=, although the commit was landed:
+
+#+begin_example
+refs/heads/filesystem    72298c2  sandbox up: copy … /src   ← rebased, on 1562871
+refs/sandbox/filesystem  311abf3  sandbox up: copy … /src   ← handed back, on 1daffe8
+
+$ git cherry filesystem refs/sandbox/filesystem
+- 311abf35c5bf6bffeb6da49b2776a9bc8bfa7377
+#+end_example
+
+=status= in =src/devops/bb/repo.clj= counts by SHA:
+
+#+begin_src clojure
+:unlanded (when sand (ahead top (or local bsha sand) sand))
+#+end_src
+
+=land!= in the same file already compares by patch (=git cherry=), and
+calls this case =:rebased=.  =status= should agree with it.
+
+* TODO Count unlanded commits by patch                              :devops_bb:
+:PROPERTIES:
+:REPO:     ~/src/github.com/kpassapk/devops.bb
+:BRANCH:   status-cherry
+:BASE:     sandbox-11-repo
+:ID:       F8427DFD-C987-41FD-B913-D12792D489F9
+:END:
+
+In =status= (=src/devops/bb/repo.clj=), count =:unlanded= as the
+commits of =refs/sandbox/BRANCH= whose patch isn't on the local branch,
+or on BASE when there is no local branch: the =+= lines of
+=git cherry <local-or-base> <sand>=, as =land!= does for =:rebased=.
+
+- A commit that's landed and then rebased counts 0.
+- A commit not landed yet still counts 1.
+- No local branch and no BASE: keep what it does now.
+- Add a test for each of these, next to the existing bundle tests.
+
+=bundle-status= prints =N unlanded= only when N is positive, so it
+needs no change.
+
+** Result
