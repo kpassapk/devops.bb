@@ -1,6 +1,7 @@
 #+TARGET: kpassapk  ~/src/github.com/kpassapk
 #+TARGET: repo      ~/src/github.com/kpassapk/bb-slug
-#+TARGET: workbook  ~/active/bb-slug/accents
+#+TARGET: worktree  ~/src/github.com/kpassapk/bb-slug-accents
+#+TARGET: workbook  ~/work/bb-slug/accents
 #+TARGET: box       /podman:box-slug:
 #+PROPERTY: header-args:sh :results output
 
@@ -23,7 +24,7 @@ a title into a slug. It drops accented letters: ="Año Nuevo"= becomes
 The task a heading in a workbook /outside/ the repository.
 
 #+begin_example
-~/active/bb-slug/accents/work.org   * TODO Fold accents   :BRANCH: accents   :BASE: main
+~/work/bb-slug/accents/work.org   * TODO Fold accents   :BRANCH: accents   :BASE: main
 #+end_example
 
 The heading's =:REPO:= names the checkout; devops-bb never looks for the
@@ -161,7 +162,7 @@ in it. Skip it and =land= makes the branch, or moves it, without one.
 #+end_src
 
 #+begin_src sh
-  devops-bb bundle status --workbook ~/active/bb-slug/accents/work.org
+  devops-bb bundle status --workbook ~/work/bb-slug/accents/work.org
 #+end_src
 
 #+RESULTS:
@@ -174,7 +175,7 @@ Start a container on the workbook's directory, as in getting_started
 (the same =-e ANTHROPIC_API_KEY=, or log in):
 
 #+begin_src sh :results silent
-  podman run -d --name box-slug -v $HOME/active/bb-slug/accents:/work:rw localhost/devops-bb-sandbox
+  podman run -d --name box-slug -v $HOME/work/bb-slug/accents:/work:rw localhost/devops-bb-sandbox
 #+end_src
 
 #+begin_src sh
@@ -190,8 +191,8 @@ with =M-x devops-bb-sandbox-attach=:
 #+begin_src elisp :results none
   (setq devops-bb-sandbox-sinks
         '(("slug" :via "podman exec -i -u root box-slug" :to "/feed"
-           :map (("/Users/kyle/active/bb-slug/accents" . "/work")))))
-  (find-file "~/active/bb-slug/accents/work.org")
+           :map (("/Users/kyle/work/bb-slug/accents" . "/work")))))
+  (find-file "~/work/bb-slug/accents/work.org")
   (devops-bb-sandbox-attach "slug" "accents")
 #+end_src
 
@@ -202,13 +203,13 @@ The mode line should say =sandbox: accents=.
 Seed the bundle, beside the workbook:
 
 #+begin_src sh
-  devops-bb bundle seed --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
+  devops-bb bundle seed --workbook ~/work/bb-slug/accents/work.org --heading "Fold accents"
 #+end_src
 
 #+RESULTS:
-: /Users/kyle/active/bb-slug/accents/bb-slug.bundle (base at aee48bc)
+: /Users/kyle/work/bb-slug/accents/bb-slug.bundle (base at aee48bc)
 
-Expected: =~/active/bb-slug/accents/bb-slug.bundle (base at <sha>)=. It
+Expected: =~/work/bb-slug/accents/bb-slug.bundle (base at <sha>)=. It
 is a regular file, which the workbook directory allows.
 
 ** Claude                                                               :box:
@@ -254,7 +255,7 @@ in your checkout, which has =main= checked out:
 stale=:
 
 #+begin_src sh
-  devops-bb bundle status --workbook ~/active/bb-slug/accents/work.org
+  devops-bb bundle status --workbook ~/work/bb-slug/accents/work.org
 #+end_src
 
 #+RESULTS:
@@ -264,11 +265,11 @@ Send the new base tip over, beside the workbook, where the container
 sees it:
 
 #+begin_src sh
-  devops-bb bundle seed --rebase --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
+  devops-bb bundle seed --rebase --workbook ~/work/bb-slug/accents/work.org --heading "Fold accents"
 #+end_src
 
 #+RESULTS:
-: /Users/kyle/active/bb-slug/accents/bb-slug.base.bundle (base at b8c7f8f)
+: /Users/kyle/work/bb-slug/accents/bb-slug.base.bundle (base at b8c7f8f)
 
 Tell Claude:
 
@@ -288,7 +289,7 @@ What to look for:
 Fetch and read, which moves nothing:
 
 #+begin_src sh
-  devops-bb bundle status --workbook ~/active/bb-slug/accents/work.org
+  devops-bb bundle status --workbook ~/work/bb-slug/accents/work.org
 #+end_src
 
 #+RESULTS:
@@ -296,7 +297,7 @@ Fetch and read, which moves nothing:
 
 
 #+begin_src sh
-  devops-bb bundle land --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
+  devops-bb bundle land --workbook ~/work/bb-slug/accents/work.org --heading "Fold accents"
 #+end_src
 
 #+RESULTS:
@@ -383,7 +384,7 @@ If you like it, move the branch, in its worktree, which has it checked
 out (uncommitted edits there stay):
 
 #+begin_src sh
-  devops-bb bundle land --apply --workbook ~/active/bb-slug/accents/work.org --heading "Fold accents"
+  devops-bb bundle land --apply --workbook ~/work/bb-slug/accents/work.org --heading "Fold accents"
 #+end_src
 
 #+RESULTS:
@@ -401,7 +402,7 @@ b8c7f8f Say what a slug may hold
 #+end_example
 
 #+begin_src sh
-  devops-bb bundle status --workbook ~/active/bb-slug/accents/work.org
+  devops-bb bundle status --workbook ~/work/bb-slug/accents/work.org
 #+end_src
 
 #+RESULTS:
@@ -458,5 +459,5 @@ Remove worktree, reset =bb-slug= to =origin/main=
   git branch -D accents
   git reset -q --hard origin/main
   git for-each-ref --format='%(refname)' refs/sandbox refs/devops | xargs -n1 git update-ref -d
-  rm -rf ~/active/bb-slug
+  rm -rf ~/work/bb-slug
 #+end_src

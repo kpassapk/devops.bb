@@ -1,23 +1,16 @@
 # devops.bb
 
-Agentic loop with Emacs [devops.el][devops-el] and [babashka][babashka].
+An agent sandbox for collaborating on [devops.el][devops-el] notebooks.
 
 [devops-el]: https://github.com/kpassapk/devops.el
 [babashka]: https://babashka.org
 
 ## Why?
 
-In your daily work as a developer, you are likely to interact with
-servers and systems containing sensitive data. You likely have
-elevated access scope via CLIs, ssh into servers, etc. If you run 
-coding agents on your local machine, the agents have the same elevated
-access scope!
-
 Best practices for security dictate that agents should be running in a
 sandbox, where they cannot access the user's file system or other
 credentialed services. "Sandboxes" and other controls built into agent
-harnesses are fragile, and the agent can overcome them easily. (I
-think.)
+harnesses themselves are fragile, and the agent can overcome them easily.
 
 The best sandbox is at the operating system level: running agents in a
 separate machine or container.  Here, the agent writes files, runs
@@ -27,87 +20,106 @@ Yet some of the most powerful use cases for agents involve real-world
 information systems, provider APIs, and deployed apps. These systems
 are "situated".
 
-When the agent needs something from the outside world, it should ask
-the user to run a command. This could be during regular coding or an
-incident.
+If you want to write [devops.el][devops-el] notebooks together with 
+an agent, you may want to try this out.
 
-During regular coding, this could be an AWS or Cloudflare command,
-running an infrastructure runbook, downloading data from a shared
-development system, looking at logs, doing discovery on an already
-running system or API, or a third party API; or getting something from
-the company's ERP.
+[devops-el]: https://github.com/kpassapk/devops.el
 
-During an incident, this could be running a command in a production
-server to determine system status or find root cause.
+## Requirements
 
-Copying and pasting commands and results is a terrible workflow,
-especially in demanding situations like an incident, when we may be
-running dozens of code blocks in quick succession.
+- [babashka][babashka]
+- Emacs 31+
+- [ob-posframe](https://github.com/kpassapk/ob-posframe)
 
-This repository provides an interactive loop for executing things on
-servers. 
+## Installation
 
-## Agentic loop
+Add to your init file
 
 ```
- servers, cloud accounts, git push
+(use-package obp-confirm-posframe
+  :vc (:url "https://github.com/kpassapk/ob-confirm-posframe" :rev :newest)
+  :hook (org-mode . ob-confirm-posframe-mode))
+
+(use-package devops-bb
+  :load-path "~/src/github.com/kpassapk/devops.bb/emacs"
+  :config
+  (devops-bb-log-mode +1)
+  :custom
+  (devops-bb-execution-log "~/.cache/devops/executions.jsonl"))
+```
+
+## How it works
+
+`devops.bb` implements a protocol for collaborating on
+[devops.el][devops-el] notebooks with executable blocks, together with
+a sandboxed agent. The sandboxed agent uses the notebook to
+communciate with the outside world, then uses that information to
+advise you or write more blocks.
+
+**Flow**
+
+```
+     servers
+   cloud accounts
+     git push
         ▲
         │ blocks you review and run
  ┌──────┴──────────────────────┐            ┌───────────────────────────┐
- │ host: Emacs                 │            │ sandbox: the agent        │
+ │ (2) host: Emacs             │            │ (1) sandbox: the agent    │
  │                             │            │                           │
- │ devops-bb publish ══════════╪═ push ════▶│ /feed  read-only          │
- │                             │            │   devops-bb follow,       │
- │                             │            │   run-output              │
+ │ devops-bb publish ══════════╪═ push ════▶│ /feed (4)                 │
+ │                             │            │   devops-bb follow        │
+ │                             │            │                           │
  │ workbook dir ◀──────────────┼─ mount ───▶│ /work  writes blocks,     │
- │                             │            │        scripts            │
+ │ |- (3) workbook.org         │            │        scripts            │
  └─────────────────────────────┘            └───────────────────────────┘
                                               no route to the host or
                                               the servers
 ```
 
-An agent that can run your CLIs can use your credentials. So the agent
-runs in a sandbox with none, and the one way to a server is a block you
-run:
+The agent (1) runs in a sandbox. It edits code, tests, builds, runs tools.
 
-- **The workbook** lives in its own directory, mounted read-write at
-  `/work`. The agent writes blocks into it, and scripts beside it.
-- **You run every block**, in Emacs, after a review that shows what will
-  run, where, and what changed since you last said yes.
-- **The feed** is pushed one way, host to sandbox: each run's event and
-  output, from that one workbook only. The sandbox has no way back.
-- **Everything that needs no credential, the agent does itself**:
-  editing code, tests, builds, `grep`. Only the credentialed step is a
-  block.
+When the the agent needs to run something via the host (2), it prints source code
+blocks in a shared Emacs workbook (3).
 
-### The image
+You (the operator) review the blocks. When you run them, the agent
+reads their output via a feed.
+
+The agent continues working on the code, or prints more blocks. Repeat.
+
+**Commands**
+
+`bin/devops-bb publish` - starts writing the feed
+`bin/devops-bb follow`  - reads the feed (usually via a skill.)
+
+## Claude Code image
 
 ```
 docker build -f sandbox/Dockerfile -t devops-bb-sandbox .
 ```
 
-It holds babashka, `git`, Claude Code, devops-bb with its deps resolved
-at build, and the `devops-bb-sandbox` skill in `~/.claude/skills`.
-Claude runs as `claude` (uid 1000), which doesn't own `/feed`, and
-`DEVOPS_BB_FEED=/feed` is set. There are no ssh keys, cloud CLIs or git
-credentials. Claude Code needs its own login, or `ANTHROPIC_API_KEY`.
-
-One container per workbook:
-
 ```
-docker run -d --name wb-box -e ANTHROPIC_API_KEY \
+docker run -d --name wb-box
   -v ~/work/wb:/work:rw devops-bb-sandbox
 docker exec -it wb-box claude
 ```
 
-Mount the workbook's directory, never the file: a save renames the
-file, and a file mount stays on the old one. Never mount a directory
-with other workbooks in it: their `#+RESULTS` hold past server output.
+The image has babashka, `git`, Claude Code, devops-bb, and the
+`devops-bb-sandbox` skill.
 
-### Attaching a workbook
+## Security
 
-Name the sinks the feed can go to, in Emacs. A sink is yours: it is
-never read from the workbook, which the agent writes.
+Claude runs as `claude` (uid 1000), which doesn't own `/feed`, and
+`DEVOPS_BB_FEED=/feed` is set. There are no ssh keys, cloud CLIs or
+git credentials. Claude Code needs its own login, or
+`ANTHROPIC_API_KEY`.
+
+Mount the workbook's directory, never the file: Emacs saves by renaming the
+file, and a file mount stops working.
+
+## Attaching a workbook
+
+
 
 ```emacs-lisp
 (setq devops-bb-sandbox-sinks
@@ -139,7 +151,7 @@ when the dir fails its check (below).
 - One sink serves one workbook at a time; many workbooks can each have
   their own.
 
-### What the review does
+## What the review does
 
 In an attached workbook, every run is confirmed in ob-confirm-posframe,
 unless you confirmed and ran exactly the same thing before: the same

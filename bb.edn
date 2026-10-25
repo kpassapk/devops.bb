@@ -1,4 +1,5 @@
-{:paths ["src"]
+{:root/parent "kpassapk/root"
+ :paths ["src"]
  :deps {io.github.kpassapk/charm.clj
         {:git/url "https://github.com/kpassapk/charm.clj.git"
          :git/sha "b1b40757fc12e82da87c13c362c8c5308c33df3f"}}
@@ -6,6 +7,7 @@
  :tasks
  {dashboard
   {:doc "Follow the devops.el execution log in a TUI"
+   :bb-transient/terminal true
    :exec-fn devops.bb.dashboard/run
    :org.babashka/cli {:spec {:log  {:desc "Execution log; default: devops-bb-execution-log from Emacs"}
                              :feed {:desc "A sandbox's feed dir; default: DEVOPS_BB_FEED. Emacs is never asked"}}}}
@@ -47,18 +49,18 @@
    :requires ([babashka.fs :as fs])
    :task (let [root (fs/parent (fs/absolutize *file*))
                dir (fn [env sibling]
-                     (str (or (System/getenv env) (fs/normalize (fs/path root ".." sibling)))))]
-           ;; Watchdog: batch ERT can hang on a prompt.  macOS has no `timeout'.
-           (shell "perl" "-e" "alarm shift; exec @ARGV" "300"
-                  "emacs" "--batch"
-                  "-L" (dir "DEVOPS_EL" "devops.el")
-                  "-L" (dir "CLJBANG" "cljbang.el")
-                  "-L" (dir "OB_CONFIRM_POSFRAME" "ob-confirm-posframe")
-                  "-L" (str (fs/path root "emacs"))
-                  "-L" (str (fs/path root "emacs" "test"))
-                  "--eval" "(setq native-comp-enable-subr-trampolines nil)"
-                  "--eval" "(require 'devops-bb-test)"
-                  "--eval" "(ert-run-tests-batch-and-exit \"^devops-bb-\")"))}
+                    (str (or (System/getenv env) (fs/normalize (fs/path root ".." sibling)))))]
+          ;; Watchdog: batch ERT can hang on a prompt.  macOS has no `timeout'.
+          (shell "perl" "-e" "alarm shift; exec @ARGV" "300"
+           "emacs" "--batch"
+           "-L" (dir "DEVOPS_EL" "devops.el")
+           "-L" (dir "CLJBANG" "cljbang.el")
+           "-L" (dir "OB_CONFIRM_POSFRAME" "ob-confirm-posframe")
+           "-L" (str (fs/path root "emacs"))
+           "-L" (str (fs/path root "emacs" "test"))
+           "--eval" "(setq native-comp-enable-subr-trampolines nil)"
+           "--eval" "(require 'devops-bb-test)"
+           "--eval" "(ert-run-tests-batch-and-exit \"^devops-bb-\")"))}
 
   test
   {:doc "Run tests"
@@ -72,10 +74,10 @@
               [devops.bb.repo-test]
               [devops.bb.view-test])
    :task (let [{:keys [fail error]} (t/run-tests 'devops.bb.cli-test
-                                                 'devops.bb.feed-test
-                                                 'devops.bb.log-test
-                                                 'devops.bb.model-test
-                                                 'devops.bb.org-test
-                                                 'devops.bb.repo-test
-                                                 'devops.bb.view-test)]
-           (when (pos? (+ fail error)) (System/exit 1)))}}}
+                                     'devops.bb.feed-test
+                                     'devops.bb.log-test
+                                     'devops.bb.model-test
+                                     'devops.bb.org-test
+                                     'devops.bb.repo-test
+                                     'devops.bb.view-test)]
+          (when (pos? (+ fail error)) (System/exit 1)))}}}
