@@ -172,10 +172,10 @@ Expected: one row: =accents on main=, =0 commits=, =seed none= and the
 worktree.
 
 Start a container on the workbook's directory, as in getting_started
-(the same =-e ANTHROPIC_API_KEY=, or log in):
+(the same =-e CLAUDE_CODE_OAUTH_TOKEN= or =-e ANTHROPIC_API_KEY=):
 
 #+begin_src sh :results silent
-  podman run -d --name box-slug -v $HOME/work/bb-slug/accents:/work:rw localhost/devops-bb-sandbox
+  podman run -d --name box-slug -e CLAUDE_CODE_OAUTH_TOKEN -v $HOME/work/bb-slug/accents:/work:rw localhost/devops-bb-sandbox
 #+end_src
 
 #+begin_src sh

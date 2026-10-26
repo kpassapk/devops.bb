@@ -13,8 +13,11 @@
 #   docker exec -it wb-box claude
 #
 # Nothing here can reach the host's Emacs or servers: no ssh keys, no
-# cloud CLIs or profiles, no git credentials. Claude Code needs its own
-# login or ANTHROPIC_API_KEY, and network to reach the API.
+# cloud CLIs or profiles, no git credentials. Claude Code needs network
+# to reach the API, and a credential passed through from the host's env:
+#
+#   docker run -d -e CLAUDE_CODE_OAUTH_TOKEN ...   # from `claude setup-token`
+#   docker run -d -e ANTHROPIC_API_KEY ...
 
 FROM babashka/babashka:1.13.226
 
@@ -37,6 +40,14 @@ COPY bin /opt/devops.bb/bin
 RUN ln -s /opt/devops.bb/bin/devops-bb /usr/local/bin/devops-bb
 
 COPY --chown=claude:claude sandbox/skills /home/claude/.claude/skills
+
+# npm's prefix is root's: the updater fails on every screen.
+ENV DISABLE_AUTOUPDATER=1
+
+# Skip the theme picker and onboarding; the login comes from the env.
+RUN echo '{"hasCompletedOnboarding":true,"theme":"dark"}' \
+      > /home/claude/.claude.json \
+ && chown claude:claude /home/claude/.claude.json
 
 USER claude
 ENV DEVOPS_BB_FEED=/feed

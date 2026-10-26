@@ -104,7 +104,8 @@ podman images | grep sandbox
 
 ** Start sandbox
 
-Start the sandbox. Pass your API key, or log in at step 5:
+Start the sandbox. Pass your API key, or =-e CLAUDE_CODE_OAUTH_TOKEN=
+with a token from =claude setup-token=, so Claude starts logged in:
 
 #+name: api-key
 #+begin_src sh :results silent

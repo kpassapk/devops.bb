@@ -99,7 +99,7 @@ docker build -f sandbox/Dockerfile -t devops-bb-sandbox .
 ```
 
 ```
-docker run -d --name wb-box
+docker run -d --name wb-box -e CLAUDE_CODE_OAUTH_TOKEN
   -v ~/work/wb:/work:rw devops-bb-sandbox
 docker exec -it wb-box claude
 ```
@@ -111,8 +111,9 @@ The image has babashka, `git`, Claude Code, devops-bb, and the
 
 Claude runs as `claude` (uid 1000), which doesn't own `/feed`, and
 `DEVOPS_BB_FEED=/feed` is set. There are no ssh keys, cloud CLIs or
-git credentials. Claude Code needs its own login, or
-`ANTHROPIC_API_KEY`.
+git credentials. Claude Code needs `CLAUDE_CODE_OAUTH_TOKEN` (from
+`claude setup-token`) or `ANTHROPIC_API_KEY`, passed with `-e`. The
+image skips the theme picker and turns off the auto-updater.
 
 Mount the workbook's directory, never the file: Emacs saves by renaming the
 file, and a file mount stops working.
