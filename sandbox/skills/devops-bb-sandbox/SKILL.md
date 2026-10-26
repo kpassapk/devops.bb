@@ -207,7 +207,7 @@ workbook; pass `--heading "<its title or :ID:>"`.
 
 | Command | Does |
 |---|---|
-| `devops-bb repo clone --heading H` | clones to `~/NAME`, on `:BRANCH:` cut from `:BASE:`; sets a git identity, no signing |
+| `devops-bb repo clone --heading H` | clones to the `:REPO:` path (`~/src/…`; `~` is your home), else `~/NAME`, on `:BRANCH:` cut from `:BASE:`; sets a git identity, no signing |
 | `devops-bb repo handoff --heading H` | bundles every branch with commits origin lacks into `/work/NAME.out.bundle`, by name |
 | `devops-bb repo rebase --heading H` | moves your branch onto its base's new tip, from `/work/NAME.base.bundle` |
 

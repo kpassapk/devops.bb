@@ -113,8 +113,16 @@
 (defn- need-name [{:keys [name]}]
   (or name (fail! "no repo name: pass --name, or give the heading a :REPO:")))
 
-(defn- clone-dir [{:keys [dir]} name]
-  (str (fs/absolutize (fs/expand-home (or dir (str "~/" name))))))
+(defn- clone-dir
+  "--dir, else the :REPO: when it is under HOME, so that a repo finding
+  another by a relative path (bb.edn's ../orgstar) finds the copy beside
+  it, else HOME/NAME."
+  [{:keys [dir]} {:keys [repo]} name home]
+  (let [home (fs/absolutize home)
+        repo (some-> repo fs/absolutize)]
+    (str (cond dir (fs/absolutize (fs/expand-home dir))
+               (and repo (fs/starts-with? repo home) (not= repo home)) repo
+               :else (fs/path home name)))))
 
 ;;; In the sandbox
 
@@ -125,14 +133,15 @@
   (git dir "config" (str "branch." branch ".devopsbase") base))
 
 (defn clone!
-  "Clone NAME.bundle from the workbook's dir to ~/NAME (or --dir), on a
-  new BRANCH cut from origin/BASE, and remember the base it was cut
-  from for `rebase!'.  {:dir :branch :base :base-sha}"
+  "Clone NAME.bundle from the workbook's dir to the :REPO:, when it is
+  under ~, else to ~/NAME (or --dir), on a new BRANCH cut from
+  origin/BASE, and remember the base it was cut from for `rebase!'.
+  {:dir :branch :base :base-sha}"
   [opts]
   (let [{:keys [branch base work] :as t} (task! opts)
         name   (need-name t)
         bundle (str (fs/path work (str name ".bundle")))
-        dir    (clone-dir opts name)]
+        dir    (clone-dir opts t name (fs/home))]
     (when-not (fs/exists? bundle) (fail! (str "no seed bundle: " bundle)))
     (when (fs/exists? dir) (fail! (str dir " exists")))
     (git "." "clone" "-q" bundle dir)
@@ -155,7 +164,7 @@
   [opts]
   (let [{:keys [work] :as t} (task opts)
         name (need-name t)
-        dir  (clone-dir opts name)
+        dir  (clone-dir opts t name (fs/home))
         out  (str (fs/path work (str name ".out.bundle")))
         new  ["--branches" "--not" "--remotes=origin"]]
     (when-not (fs/exists? dir) (fail! (str "no clone at " dir)))
@@ -177,7 +186,7 @@
   [opts]
   (let [{:keys [work branch] :as t} (task! opts)
         name    (need-name t)
-        dir     (clone-dir opts name)
+        dir     (clone-dir opts t name (fs/home))
         pending (str "refs/devops/rebasing/" branch)
         base    (or (not-empty (:out (git* dir "config" (str "branch." branch ".devopsbase"))))
                     (:base t))
@@ -343,7 +352,7 @@
    :base     {:desc "Overrides the heading's :BASE: (default main)"}
    :repo     {:desc "The operator's checkout; default: the heading's :REPO:"}
    :name     {:desc "The repo's name for the bundle files; default: the heading's :REPO:"}
-   :dir      {:desc "Claude's clone; default ~/NAME"}})
+   :dir      {:desc "Claude's clone; default the :REPO:, when under ~, else ~/NAME"}})
 
 (defn- short [sha] (subs sha 0 7))
 

@@ -191,3 +191,16 @@
                             (repo/clone! {:workbook api-wb :heading "API" :base "main" :dir agent})))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"both"
                             (repo/clone! {:workbook api-wb :heading "API" :base "api" :dir agent}))))))
+
+(deftest clone-dir-test
+  (let [clone-dir #'repo/clone-dir
+        home "/home/claude"]
+    (testing "the :REPO:, when under home, so that its siblings' relative paths work"
+      (is (= "/home/claude/src/github.com/a/forge"
+             (clone-dir {} {:repo "/home/claude/src/github.com/a/forge"} "forge" home))))
+    (testing "else ~/NAME: no :REPO:, one outside home, or home itself"
+      (is (= "/home/claude/forge" (clone-dir {} {} "forge" home)))
+      (is (= "/home/claude/forge" (clone-dir {} {:repo "/Users/k/src/forge"} "forge" home)))
+      (is (= "/home/claude/forge" (clone-dir {} {:repo "/home/claude"} "forge" home))))
+    (testing "--dir wins"
+      (is (= "/tmp/x" (clone-dir {:dir "/tmp/x"} {:repo "/home/claude/src/forge"} "forge" home))))))
