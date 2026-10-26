@@ -1,4 +1,4 @@
-{:root/parent "kpassapk/root"
+{:forge/parent "atomstream/forge"
  :paths ["src"]
  :deps {io.github.kpassapk/charm.clj
         {:git/url "https://github.com/kpassapk/charm.clj.git"
