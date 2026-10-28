@@ -1,0 +1,632 @@
+#+TITLE: Link review: Emacs ↔ agent communication
+#+CATEGORY: work
+
+An architect's review, done on 2026-10-27, of the connection side of the
+editing loop: how events get from Emacs to the sandboxed agent, and how
+the agent writes back.  It feeds a planned split of the sandbox skill
+into =devops-link= (the event loop) and =devops-feature= (code
+transport).  The items marked "checked" were confirmed by reading the
+code; the rest come from the review and are unverified.
+
+* Pipeline today
+
+** Producers (=emacs/devops/bb/log.clj=)
+- =execute= comes from =org-babel-after-execute-hook= (:174-181, hook
+  at :271), only for runs the user started (=devops-user-run-p=, :171).
+- =result= comes from advice on =org-babel-comint-async-filter= and
+  =org-babel-insert-result= (:183-213, :278-281).  The run id is read
+  from the =#+RESULTS= placeholder before the result is inserted.
+- =modify= comes from =first-change-hook= (:262, :273).  It fires once
+  per modified period, not per keystroke, and is suppressed while a
+  result is being inserted (:208).
+- =save=, =revert= and =kill= come from =after-save-hook=,
+  =after-revert-hook= and =kill-buffer-hook= (:263-265).
+- =tangle= and =drift= come from =devops-command-functions=.
+- =emit= (:131-142) builds one entry and fans it out to
+  =executions.jsonl=, global subscribers and buffer subscribers.
+- =devops-bb-review--save-result= (=emacs/devops-bb-review.el:769-787=,
+  depth 95) saves the buffer after every result insert, so every run
+  also produces a =save=.  It skips the save if the file changed on
+  disk (:780).
+
+** Emacs → publisher
+The sandbox subscriber (=emacs/devops/bb/sandbox.clj:198-209=) adds
+output to each entry: the answer for a =result=, or a fresh UUID plus
+=#+RESULTS= for a sync =execute= (:175-196).  It sends one JSON line
+per entry with =process-send-string= on the pipe to the child
+=devops-bb publish= (:109-114, :233-248).  A =status= line is sent
+whenever the visited file changes (:116-130).
+
+** Publisher (=src/devops/bb/publish.clj=)
+- A reader thread runs =line-seq= over stdin and puts items on a
+  =LinkedBlockingQueue=.  The seq number is assigned only when an item
+  is queued (:215).
+- Past 10,000 queued items, lines are dropped and counted (:210-212).
+- A writer thread puts the output file, then appends the event,
+  retrying forever with backoff from 100 ms to 5 s (:181-189, :223-241).
+- A heartbeat writes =status.json= every 3 s (:277-282).
+
+** Transport (=src/devops/bb/feed.clj=)
+- =LocalDir= puts files with an atomic rename and appends events with
+  =spit :append= (:59-72).
+- =Via= runs one =docker exec … sh -c= per operation with a 30 s
+  timeout (:151-180).  Output and event go in one batched command
+  (:159-167).  Each heartbeat is also one exec.
+- Feed layout: =status.json=, =events.jsonl=, =outputs/<uuid>.json=.
+
+** Consumer (sandbox)
+- =follow-feed= (=src/devops/bb/cli.clj:256-267=) polls every 300 ms.
+- =feed-poll= (:206-251) and =events-after= (=feed.clj:192-206=, which
+  drops anything with =seq <= last=) do the reading.
+  =log/read-from= (=src/devops/bb/log.clj:36-57=) keeps a partial last
+  line for the next read.
+- Output is =SEQ summary= on stdout; notices go to stderr.
+- =modified= takes the last of =modify=, =save=, =revert= and =kill=
+  (=cli.clj:53-60=).
+- =run-output= reads the output file.
+
+** Agent → host
+The agent writes =/work/wb.org= directly.  =global-auto-revert-mode=
+(README:129) picks up the change, which fires =after-revert-hook= and
+produces a =revert= event.
+
+* Failure modes, most likely and most damaging first
+
+** Confirmed in the code
+1. *Restarting =follow= without =--after= loses events.*  Without
+   =--after= it starts at the current end of the file
+   (=cli.clj:257-259=, checked).  The cursor exists only in the agent's
+   context, so =/compact= or a dead Monitor loses it.  The 2026-10-20
+   trial saw this ("Claude had stopped =follow= after its first
+   answer", findings §1).
+2. *=--after N= silently skips events after a feed restart.*
+   =restart?= needs =(:started st)=, which isn't set on the first poll
+   (=cli.clj:213=, checked).  The new feed's numbers start again at 1,
+   so every event up to N is filtered out and no notice is printed.
+3. *The agent's own writes come back as host events.*  Every agent
+   write causes an auto-revert, which produces a =revert= event.  Every
+   run adds a =save= the operator never made.  Events don't record who
+   caused them.
+4. *An operator edit tells the agent almost nothing.*  =modify= says
+   =file:all=, with no heading, line or diff.  The agent only learns
+   what changed after a =save=, by diffing the file itself.
+5. *The =modified= check races the agent's write.*  Feed lag (the
+   300 ms poll plus a docker exec per event) leaves a gap between the
+   agent's check and its write.  If the operator starts typing in that
+   gap, auto-revert skips the modified buffer and =save-result=
+   refuses to save (review.el:780).  The loop is stuck until someone
+   reverts.
+6. *Line numbers go stale.*  =file:line= is recorded at run time, and
+   agent inserts above a block move it.  Blocks have no stable
+   identity.
+7. *The staleness check compares two clocks.*  It compares the host's
+   =publisher-time= with the sandbox's =now= (=cli.clj:223-224=).  VM
+   clock drift after the laptop sleeps can cause false "stale" notices
+   or hide a real stall.
+8. *Dropped events leave no gap in the seq numbers.*  The seq is
+   assigned after the queue-full check (=publish.clj:210-215=,
+   checked).  =dropped= is recorded in =status.json= but never turned
+   into a notice.
+9. *Events are discarded while the publisher is dead.*  =send!= does
+   nothing if the process isn't live (=sandbox.clj:113=).  Nothing is
+   buffered, and a restart starts a new feed.
+10. *Duplicates are handled.*  A retried append can land twice, and
+    readers drop it by seq.  A retried put just overwrites.  This part
+    is sound.
+11. *=modify= can stick.*  Undoing back to an unmodified buffer emits
+    nothing.
+
+** Speculative, needs testing
+- +Monitor may show only stdout.+  Confirmed, see [[*Verification,
+  2026-10-27][Verification]]: stderr never reaches the agent.
+- +Each Monitor line may cost an agent turn.+  Partly: lines within
+  200 ms come as one notification, so a burst spread over seconds
+  still means several wake-ups.
+- Over the bind mount, kqueue may not notice writes made from the
+  container.  The fallback is =auto-revert-interval= (5 s); the
+  reference init keeps polling on for this
+  (=emacs/reference/extras/devops-bb.el:45-46=).
+- A slow docker exec (up to 30 s before timeout) holds up every later
+  event.
+
+Keystroke churn is not a problem: =first-change-hook= fires once per
+modified period, and auto-save triggers no hooks.  The noise is about
+meaning (echoes and automatic saves), not volume.
+
+* What the skill tells the agent to do
+
+=sandbox/skills/devops-bb-sandbox/SKILL.md:42-55, 85-97=: run =status=,
+start =follow= as a background monitor, check =modified=, write, wait,
+then call =run-output= on =result=.
+
+- It never says: keep the monitor alive across turns, check that it's
+  still running, restart it with =--after <last seq>=, or write the
+  cursor down somewhere that survives compaction.
+- =--after= is presented as optional, so the default behaviour is the
+  one that loses events.
+- It doesn't say which events need action, so echoes look like news.
+- There is no acknowledgement back to the host.
+- The restart notice tells the agent to "resume from seq 0", but it is
+  printed on stderr.
+- Code transport (:200-264) is about half the skill.
+
+=~/.claude/skills/devops-bb= is a symlink to =skills/devops-bb=, which
+commit bc347a8 deleted.  Only the design doc
+(=work/20261016T150300--devops-sandbox.org:823,844,1659=) still refers
+to it.
+
+* Recommendations
+
+** Cursor, in code
+- Identify the feed as ={epoch: started, seq}=, and add =epoch= to
+  every event.
+- =follow= keeps the cursor itself, in
+  =~/.cache/devops-bb/cursor/<feed>.json=, and resumes from it by
+  default.  If the epoch doesn't match, it replays from 0 and prints a
+  restart line.
+- A =devops-bb ack SEQ= command moves the cursor only after the agent
+  has handled an event.  Delivery is then at-least-once, and handling
+  is idempotent per run id and seq.
+- Write the ack somewhere the host can read (not a dotfile in =/work=),
+  so the mode line can show "agent behind by N".
+
+** Who caused an event
+- Add =origin= to events.  The save made by =save-result= gets
+  =origin: auto=.
+- Put the file's sha256 on =save= and =revert=.  The agent records the
+  hash after each of its own writes, so a =revert= whose hash matches
+  is marked =origin: agent=.
+
+** Debounce and coalescing
+- Keep Emacs and the transport lossless.
+- Add =follow --wake= on the agent side:
+  - Wait 750 ms after the last event, with a 3 s cap.
+  - Emit one line per thing that needs action: a result or sync
+    execute, an operator save (with the headings that changed),
+    detached, restart, stale.
+  - Hide =modify=, automatic saves and the agent's own reverts.
+  - Keep =--raw= for debugging.
+
+** What an edit carries
+- On an operator =save=, the host attaches a heading-level change
+  summary: heading ids and line ranges.
+- Identify blocks by =#+name= or the heading's =:ID:=, plus a body
+  hash.
+
+** Liveness
+- Judge staleness by whether =publisher-time= has changed, measured on
+  the sandbox's monotonic clock.
+- Print notices on stdout, prefixed =!=.
+- =follow= writes its own heartbeat, so a =devops-bb link status=
+  command can say whether it is alive and how far behind it is.
+- Surface =dropped=, and leave a gap in seq for dropped events.
+
+** Write safety
+Replace check-then-write with something that can't race: write a
+=wb.org.proposed= file, or have the host do a 3-way merge when it
+reverts a modified buffer.  At minimum, =modified= should report the
+feed's lag and refuse if the cursor is behind.
+
+** How to split the skills
+- =devops-link=: start, resume and check the loop (one Monitor running
+  =follow --wake=, restarted on exit, ack after handling), what each
+  event means, what to ignore, the rules for writing the workbook, and
+  the output security rules.
+- =devops-feature=: the "Code changes" section plus the result and
+  push blocks.
+- In code, in neither skill: the cursor, the epoch, coalescing, origin
+  tagging, liveness.
+
+* Verification, 2026-10-27
+Done by reading the code and by running the publisher and =follow=
+against a local-dir feed.  Docker wasn't running, so nothing went
+through =Via=, and no live Emacs runs were done: experiments 1 and 3
+as written are still open.
+
+** Results
+| #  | Claim                                   | Result                  | How                                         |
+|----+-----------------------------------------+-------------------------+---------------------------------------------|
+| 1  | =follow= without =--after= loses events | confirmed, and worse    | code; Monitor's 30-minute cap               |
+| 2  | =--after N= skips a restarted feed      | reproduced              | two publishers, then =follow --after 5=     |
+| 3  | Agent writes come back as host events   | confirmed; refined      | code                                        |
+| 4  | =modify= carries no location            | confirmed               | =log.clj:257-262=, =cli.clj:195=            |
+| 5  | =modified= races the agent's write      | mechanism confirmed     | =review.el:780=; not timed                  |
+| 6  | Line numbers go stale                   | confirmed               | =sandbox.clj:196=                           |
+| 7  | Staleness compares two clocks           | reproduced              | =feed-poll= with a skewed =now=             |
+| 8  | Dropped events leave no seq gap         | reproduced              | publisher with =:max-queued 5=, slow sink   |
+| 9  | Events lost while the publisher is dead | confirmed               | =sandbox.clj:113=, =publish.clj:227=        |
+| 11 | =modify= sticks after undo              | confirmed               | no Emacs hook fires when undo clears it     |
+| –  | Monitor shows only stdout               | confirmed               | a Monitor run printing to both streams      |
+| –  | One Monitor line, one wake-up           | partly: 200 ms batching | same run                                    |
+
+** Details
+- *#1 is guaranteed, not occasional.*  A Monitor ends after at most
+  30 minutes (the tool's =timeout_ms= cap) and has to be started
+  again.  Every operator session longer than that goes through a
+  restart, and without =--after= each one loses whatever happened in
+  between.  The cursor in code is the first fix to make.
+- *#2 reproduced.*  Feed A published seqs 1-5, then a new publisher
+  started feed B with 3 =modify= events.  =follow --after 5= printed
+  none of them and no restart notice, only "detached" (on stderr).
+  For comparison, a =follow= already running when the feed restarts
+  does print "feed restarted" and then B's seqs 1-3, so the bug is
+  only in the first poll.  A one-line fix: when =--after= is given,
+  say whether the feed's =started= is the one the cursor came from.
+  That is the epoch from the recommendations.
+- *#3, more precisely.*  =org-babel-insert-result= runs twice for an
+  async run, once for the placeholder and once for the result, and
+  =save-result= saves after both (from reading the code; not seen in a
+  live run).  So one async run produces =save=,
+  =execute running=, =save=, =result=, and none of the saves is the
+  operator's.  A sync run produces =save=, then =execute=.
+- *#7 reproduced.*  With a fresh heartbeat, a sandbox clock 20 s ahead
+  prints "publisher heartbeat is 20 s old".  A clock 60 s behind
+  would hide a stall until the heartbeat is 75 s old.
+- *#8 reproduced.*  With =:max-queued 5= and a sink taking 50 ms per
+  append, 20 events gave =enqueued 5, dropped 15=; the feed held
+  seqs 1-5 with no gap, and =follow= printed no notice.
+  =status.json= said =dropped: 15=.
+- *Monitor.*  A script printing =out-1=, =err-1=, =out-2=, =out-3=,
+  =err-2= gave the agent three lines in two notifications: =out-1=,
+  then =out-2= and =out-3= together.  The =err-= lines went to the
+  output file only.  Every =follow= notice, including "feed restarted
+  ... resume from seq 0" that the skill relies on, is invisible to an
+  agent following through Monitor.  The fix (notices on stdout, with a
+  =!= prefix) is small and should come first, with the cursor.
+- *Skill.*  The skill describes the notices in a table
+  (=SKILL.md:90-97=) but never says to watch stderr, and step 2 says
+  =follow= "prints a line per event, from now on", which teaches the
+  losing default.  The =~/.claude/skills/devops-bb= symlink still
+  points at the deleted =skills/devops-bb=.
+
+** Changed priorities
+1. Notices on stdout, and the cursor with an epoch in =follow=.  Both
+   are small, and without them the agent misses events in normal use.
+2. Count dropped events as a seq gap, and judge staleness by whether
+   =publisher-time= changed.  Both are local to =publish.clj= and
+   =feed-poll=.
+3. =origin= on events, so the agent's own reverts and the automatic
+   saves stop looking like the operator's actions.
+4. =--wake=: with 200 ms batching already in Monitor, the debounce
+   matters for bursts spread over seconds, which every async run
+   produces.
+
+* Live run, 2026-10-27
+A realistic run of experiments 1, 3 and 5.  Everything ran on the
+host: the reference Emacs (=emacs -nw --init-directory=emacs/reference=,
+server =linkrev=) in tmux, the workbook =~/sandbox-link-review/wb.org=
+attached to the sink =lr= (=:via "podman exec -i -u root lr-box"=), and
+Claude Code 2.1.304 (Opus 5.5) in =lr-box=, built from this checkout.
+The operator's runs went in as keystrokes (=C-c C-c=, then =y= at the
+confirm), sent with tmux after =emacsclient= moved point to the block.
+
+** Results
+| Experiment                 | Result                                                   |
+|----------------------------+----------------------------------------------------------|
+| 1. Resume and loss         | *fail*: the agent saw 11 of 21 runs; 10 are gone for good |
+| 3. Echo attribution        | pass: 30 of 30 events right, by timing heuristics        |
+| 5. Latency (=podman exec=) | burst of 10: p95 1.0 s; burst of 100: last at 10.8 s     |
+| 5. Clock skew              | box ahead of the host by about 0.1-0.2 s; no false stale |
+| 5. Monitor and stderr      | not reached: the agent never used Monitor                |
+
+** New finding: =follow | head -n1= never wakes the agent
+The skill says to run =follow= under Monitor.  The agent didn't.  Each
+time it ran =devops-bb follow --after N | head -n1= as a background
+shell, expecting to be woken by the first event.  =head= exits after
+one line, but =follow= keeps running: a write to the closed pipe is
+swallowed (Java's =PrintStream= sets an error flag rather than throw),
+so the shell never finishes and the agent is never woken.  Reproduced
+on the host: the pipeline only ended when an alarm killed it 12 s
+later.
+
+The agent learnt of every event because the operator asked in chat
+("I ran probe-1 a minute ago.  Did you see it?").  It answered "my
+watcher stopped after the first event", which is wrong, and started
+the same pipeline again.  So in normal use the loop doesn't work at
+all, whatever the cursor does.
+
+Fix, in code: =follow= exits when stdout is closed (check
+=(.checkError System/out)= after each flush), and gets a =--count N=
+or =--once= for the one-shot wake-up agents reach for.  The skill
+should show the exact Monitor call.
+
+** Experiment 1: resume and loss
+1. Run probe-1 once; the agent caught up only when asked (seq 1-5).
+2. Ten runs, one about every 2.7 s (old seq 6-46).
+3. =/compact=.  Then detach and attach again, a new feed.
+4. Ten more runs (new seq 1-40), and ask "catch up, and tell me how
+   many runs you have seen".
+
+The agent reported 11 runs: the first, and the ten after the attach.
+The ten in step 2 were never handled and are no longer anywhere: the
+new publisher empties =events.jsonl= (=publish.clj:227=).  It did
+avoid bug #2: it heard of the restart from the operator, not from a
+notice, and replayed with =--after 0=.  Its cursor survived
+=/compact= because it kept one itself, in =/tmp/handled.log=, which
+the prompt asked for; the skill doesn't.  It also logged old seq 6
+(an automatic save) as =operator=, a guess it flagged: the feed it
+could have checked was gone.
+
+So, besides the cursor and the epoch, a re-attach should keep the old
+feed (or its tail) until the agent has acked it, rather than empty it.
+
+** Experiment 3: echo attribution
+The agent wrote ten notes, about 21 s apart, from one script, while
+the operator modified and saved every 20 s.  All 30 events (seq 41-70)
+were attributed right: 10 =modify= and 10 =save= to the operator, 10
+=revert= to itself.  But it did that from timing patterns of its own
+writes (it noted a steady 140 ms clock offset, and one revert that
+didn't fit), which would not hold for writes made one per turn.
+=origin= and a file hash are still needed.
+
+The race (#5) fired once: the agent's =modified= check saw the
+operator's unsaved edit and waited 2 s.  Its check-to-write gap is
+about a second, since each =devops-bb modified= is a new bb process.
+
+** Experiment 5: transport
+A burst through =devops-bb publish --via "podman exec -i -u root
+lr-box"=, timed until each line was in the container's
+=events.jsonl= (sampled about every 0.1 s):
+
+| Burst | p50    | p95     | Last    |
+|-------+--------+---------+---------|
+|     1 | 0.18 s | 0.18 s  | 0.18 s  |
+|    10 | 0.72 s | 1.03 s  | 1.03 s  |
+|   100 | 5.54 s | 10.36 s | 10.83 s |
+
+That is about 0.1 s per event, one =podman exec= each, in order.  One
+run is four events, so the =result= reaches the agent about 0.4 s
+after Emacs has it.  A burst of 10 is just over the 1 s target; batching
+several queued events into one exec would fix it.  Clock skew between
+host and box was 0.1-0.2 s; no false stale notice.
+
+The bind mount carried the agent's writes at once: each =revert=
+came within 0.2 s of the write, so kqueue saw them (the
+=auto-revert-interval= fallback wasn't needed here).
+
+** Other things seen
+- Every run was =save=, =execute running=, =save=, =result=, as
+  predicted in #3, within 5 ms.
+- =save-result= saves the operator's own unsaved edits along with the
+  result, without asking (seq 10, a stray edit, then seq 11, saved by
+  the next run).
+- Claude in the box asks "Detected a custom API key ... use this API
+  key?" with "No (recommended)" selected, though the image means to
+  start logged in.  Pre-approving needs the key's last 20 characters in
+  =~/.claude.json= (=customApiKeyResponses=), which can't be baked
+  into the image; an entrypoint could write it.
+
+** Harness slips
+Two of my driver's mistakes, fixed or allowed for:
+- It sent =y= after =C-c C-c= unconditionally; an unchanged block runs
+  without a prompt, so =y= went into the buffer.  Fixed (=y= only when
+  "Run probe-" is showing), and the buffer cleaned.
+- =tmux send-keys -l "- operator note N"= is refused (a leading =-=),
+  so each operator edit in experiment 3 was a newline only.  Still a
+  real =modify= and =save=, so the attribution counts stand.
+
+* Experiments
+Each run uses tmux with three panes: =emacs -nw
+--init-directory=emacs/reference= driven by =emacsclient=, =docker
+exec -it box claude=, and =tail -f /feed/events.jsonl=.
+
+1. *Resume and loss.*  Script 20 runs, one every 2 s, with
+   =emacsclient --eval '(progn (goto-line N) (org-ctrl-c-ctrl-c))'=.
+   Partway through, kill =follow=, run =/compact=, then detach and
+   re-attach.  Compare the seqs the agent handled with
+   =events.jsonl=.  Pass: no events missed.
+2. *Noise and wake-ups.*  Five minutes of mixed activity.  Compare raw
+   output with =--wake= at 0, 750 and 2000 ms.  Measure agent turns,
+   tokens and p50 latency.  Pass: at most one wake-up per operator
+   action, nothing that needs action dropped, p50 under 3 s.
+3. *Echo attribution.*  Ten agent writes interleaved with ten operator
+   saves.  Pass: no echo is treated as operator activity.
+4. *Write race.*  The agent writes right after =modified= returns
+   false, and =emacsclient= inserts text 0–500 ms later.  Pass: no
+   lost edits, and every conflict is shown to both sides within 5 s.
+5. *Transport latency and clocks.*  Send bursts of 1, 10 and 100
+   events through =Via= and through =LocalDir=.  Skew the VM clock by
+   20 s.  Check whether Monitor shows stderr.  Pass: p95 under 1 s for
+   bursts of 10, no false stale notice, notices visible to the agent.
+
+* Next
+1. Make =follow= exit on a closed stdout, and add a one-shot mode; show
+   the Monitor call in the skill.  Without this the loop never runs on
+   its own.
+2. Cursor and epoch in =follow=, notices on stdout, and keep the old
+   feed until it is acked, so a re-attach loses nothing.
+3. Re-run experiment 1 with the agent left alone (no nudges), and run
+   experiment 2, which this run couldn't: the agent never woke on its
+   own.
+
+* Implementation
+
+Each L2 is one PR, from [[*Next][Next]] and [[*Changed priorities][Changed priorities]].  The PRs are a
+stack: each branches from the one above it (=:BASE:=), and the first
+from =main=.  Branch names use a dash, =link-NN-…=, as the sandbox
+steps do.  Spikes come first, run by the operator on the host; the
+answer goes in the PR description.  Every PR: =bb test= and
+=bb test-emacs= pass, and new behavior has a test.
+
+Out of scope here, for a later stack: what an edit carries (heading
+ids on =save=, block identity by =#+name= or =:ID:=), and write safety
+(=wb.org.proposed= or a 3-way merge on revert).  Until then the agent
+keeps the =modified= check.
+
+** TODO 1. =follow= wakes the agent: closed stdout, =--once=, notices on stdout
+:PROPERTIES:
+:BRANCH:   link-01-follow-wakes
+:BASE:     main
+:END:
+
+The live run's finding: =follow | head -n1= never ends, so the agent
+is never woken, and Monitor never shows a notice (stderr).  Without
+this PR the loop does not run on its own, whatever the cursor does.
+
+*** Spike: does =checkError= see the closed pipe?                    :local:
+
+=println= to a closed pipe sets =PrintStream='s error flag and
+returns.  Check that bb's =System/out= reports it after a flush, and
+how soon.
+
+#+begin_src sh
+time (timeout 10 bb -e '(loop [n 0]
+  (println n) (flush)
+  (if (.checkError System/out)
+    (binding [*out* *err*] (println "closed after" n))
+    (do (Thread/sleep 100) (recur (inc n)))))' | head -n1)
+#+end_src
+
+Expected: =0=, then =closed after 1= on stderr, well under a second.
+If =*out*= is not =System/out= in bb, check the writer bb binds.
+
+*** Done when
+
+- [ ] =follow= exits 0 within one poll once its stdout is closed:
+  =follow --after 0 | head -n1= returns after the first event (test,
+  with a local-dir feed and a publisher).
+- [ ] =follow --once= prints the first batch of new events (one poll
+  that has any) and exits 0.  =--count N= exits after N lines.
+- [ ] Notices go to stdout, prefixed =! =, and stderr only for errors.
+  The restart notice says the =--after= to use.
+- [ ] The skill shows the exact Monitor call, and says not to pipe
+  =follow= into =head=.
+- [ ] The dead =~/.claude/skills/devops-bb= symlink is gone from the
+  setup docs.
+
+** TODO 2. The cursor and the epoch in =follow=, and =ack=
+:PROPERTIES:
+:BRANCH:   link-02-cursor
+:BASE:     link-01-follow-wakes
+:END:
+
+Fixes failure modes #1 and #2: a restarted =follow= loses events, and
+=--after N= skips a restarted feed.  The Monitor's 30-minute cap makes
+#1 certain in any long session.
+
+*** Spike: what does a re-attach do to the old feed?                :local:
+
+Start a publisher on a local-dir feed, send 5 events, stop it, start
+another on the same dir.  Is =events.jsonl= emptied before or after
+the new =started= is written, and is anything of the old feed left?
+
+#+begin_src sh
+d=$(mktemp -d)
+for i in 1 2 3 4 5; do echo '{"type":"modify","file":"x"}'; done \
+  | devops-bb publish --to "$d"
+cp "$d/status.json" "$d/status.a.json"; wc -l "$d/events.jsonl"
+echo '{"type":"modify","file":"x"}' | devops-bb publish --to "$d"
+jq -c '{started}' "$d/status.a.json" "$d/status.json"; cat "$d/events.jsonl"
+#+end_src
+
+The answer decides where the old tail goes (=events.<epoch>.jsonl=
+beside the new one) so a re-attach loses nothing.
+
+*** Done when
+
+- [ ] Every event carries =epoch= (the feed's =started=).  The cursor
+  is ={epoch, seq}=.
+- [ ] =follow= keeps the cursor in =~/.cache/devops-bb/cursor/<feed>.json=
+  and resumes from it by default.  =--after N= still works, and sets
+  the cursor.
+- [ ] An epoch that doesn't match the cursor's replays the new feed
+  from seq 0 and prints =! feed restarted …=, on the first poll too
+  (the =--after 5= repro from [[*Details][Details]] is a test).
+- [ ] =devops-bb ack SEQ= moves the cursor; =follow= moves it only
+  past events it was told were handled.  Delivery is at-least-once.
+- [ ] A re-attach keeps the old feed's unacked tail where =follow=
+  reads it before the new feed.
+- [ ] The ack lands where the host can read it (not a dotfile in
+  =/work=), and the mode line shows "agent behind by N".
+- [ ] Experiment 1, re-run with the agent left alone (no nudges),
+  passes: no events missed across a =/compact= and a re-attach.
+
+** TODO 3. Publisher: a seq gap for drops, staleness on one clock
+:PROPERTIES:
+:BRANCH:   link-03-publisher
+:BASE:     link-02-cursor
+:END:
+
+Failure modes #7 and #8, both local to =publish.clj= and =feed-poll=.
+
+*** Done when
+
+- [ ] A dropped event still takes a seq, so the feed shows a gap, and
+  =follow= prints =! N events dropped (seq A-B)=.  The
+  =:max-queued 5= repro is a test.
+- [ ] Staleness is judged by whether =publisher-time= changed, timed
+  on the sandbox's monotonic clock.  With the box clock 20 s ahead or
+  60 s behind there is no false or hidden stale notice (test with a
+  skewed =now=).
+- [ ] =Via= sends every queued event in one exec: a burst of 10 has
+  p95 under 1 s (experiment 5, re-run).
+
+** TODO 4. Who caused an event: =origin= and the file hash
+:PROPERTIES:
+:BRANCH:   link-04-origin
+:BASE:     link-03-publisher
+:END:
+
+Failure mode #3.  Experiment 3 passed only on timing heuristics,
+which fail for writes made one per turn.
+
+*** Spike: what saves does one run make?                            :local:
+
+From reading the code, an async run gives =save=, =execute running=,
+=save=, =result=, and a sync run =save=, =execute=.  Run one of each
+in an attached buffer and read the log's last lines, to see which
+save comes from =save-result= and which from the operator's
+=C-c C-c=.
+
+#+begin_src sh
+tail -n 8 "$(emacsclient --eval devops-bb-execution-log | tr -d \")" | jq -c '{type, file, time}'
+#+end_src
+
+*** Done when
+
+- [ ] Events carry =origin=: =operator=, =auto= (the save made by
+  =devops-bb-review--save-result=) or =agent=.
+- [ ] =save= and =revert= carry the file's sha256.  The agent records
+  the hash after each of its writes (a new =devops-bb wrote=), and =follow=
+  marks a =revert= with a matching hash =origin: agent=.
+- [ ] Experiment 3, re-run with one write per agent turn: no echo is
+  treated as operator activity.
+
+** TODO 5. =follow --wake=: one line per thing to act on
+:PROPERTIES:
+:BRANCH:   link-05-wake
+:BASE:     link-04-origin
+:END:
+
+Monitor batches lines only within 200 ms; every async run is four
+events spread over seconds.
+
+*** Done when
+
+- [ ] =--wake= waits 750 ms after the last event, at most 3 s, then
+  prints one line per thing that needs action: a result or sync
+  execute, an operator save, detached, restart, stale, dropped.
+- [ ] It hides =modify=, =origin: auto= saves and =origin: agent=
+  reverts.  =--raw= prints every event, as today.
+- [ ] Experiment 2 at =--wake= 0, 750 and 2000 ms: at most one wake-up
+  per operator action, nothing that needs action dropped, p50 under
+  3 s.
+
+** TODO 6. Split the skill: =devops-link= and =devops-feature=
+:PROPERTIES:
+:BRANCH:   link-06-skills
+:BASE:     link-05-wake
+:END:
+
+*** Done when
+
+- [ ] =devops-link=: start, resume and check the loop (one Monitor on
+  =follow --wake=, restarted on exit, =ack= after handling), what each
+  event means and what to ignore, the rules for writing the workbook,
+  and the output security rules.
+- [ ] =devops-feature=: the "Code changes" section, and the result and
+  push blocks.
+- [ ] Neither skill does what the code now does: the cursor, the
+  epoch, coalescing, origin, liveness.
+- [ ] A fresh Claude in the box, with only the two skills, runs a
+  ten-run session without a nudge from the operator.
