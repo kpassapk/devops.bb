@@ -1,4 +1,5 @@
 #+TITLE: Link review: Emacs ↔ agent communication
+#+TARGET: project ..
 #+CATEGORY: work
 
 An architect's review, done on 2026-10-27, of the connection side of the
@@ -711,7 +712,7 @@ events spread over seconds.
   Not run: it needs a live Claude.  On the fake-clock timeline, 750 ms
   gives one batch per run or edit, and the 3.6 s burst two.
 
-** TODO 6. Split the skill: =devops-link= and =devops-feature=
+** TODO 6. Split the skill: =devops-link= and =devops-feature= :project:
 :PROPERTIES:
 :BRANCH:   link-06-skills
 :BASE:     link-05-wake
@@ -745,3 +746,30 @@ events spread over seconds.
 - [ ] A fresh Claude in the box, with only the two skills, runs a
   ten-run session without a nudge from the operator.
   Not run: it needs a rebuilt image and a live operator session.
+
+#+begin_src sh
+  podman build -f sandbox/Dockerfile -t devops-bb-sandbox .
+#+end_src
+
+#+begin_src sh
+  podman run -d --name user -e CLAUDE_CODE_OAUTH_TOKEN -v $PWD/user:/work:rw localhost/devops-bb-sandbox
+#+end_src
+
+#+begin_src sh
+  podman exec -it user claude
+#+end_src
+
+#+begin_src sh
+  podman stop user
+#+end_src
+
+#+RESULTS:
+: user
+
+#+begin_src sh
+  podman rm user
+#+end_src
+
+#+RESULTS:
+: user
+

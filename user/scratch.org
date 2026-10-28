@@ -1,77 +1,54 @@
 #+TARGET: .. (project)
 
-* Scratch                                                           :project:
+* Setup                                                             :project:
 
 #+begin_src sh
   podman build -f sandbox/Dockerfile -t devops-bb-sandbox .
 #+end_src
 
+#+begin_src sh
+  podman run -d --name user -e CLAUDE_CODE_OAUTH_TOKEN -v $PWD/user:/work:rw localhost/devops-bb-sandbox
+#+end_src
+
+With point below, =devops-run-in-terminal=
+
+#+begin_src sh
+  podman exec -it user claude
+#+end_src
+
 #+RESULTS:
-#+begin_example
-STEP 1/14: FROM babashka/babashka:1.13.226
-STEP 2/14: RUN apt-get update  && apt-get install -y --no-install-recommends       ca-certificates git nodejs npm jq ripgrep less  && rm -rf /var/lib/apt/lists/*
---> Using cache 63f024cebd6d5e734d19d7c2db707753a2424b3ba0eeb2d02b8e081e9405bd39
---> 63f024cebd6d
-STEP 3/14: RUN npm install -g @anthropic-ai/claude-code
---> Using cache e2dd35c2000444c027157dc9d0d51384d686bf56ef3e01c89a6c7f8b1367475f
---> e2dd35c20004
-STEP 4/14: RUN (userdel -r ubuntu 2>/dev/null || true)  && useradd -m -u 1000 -s /bin/bash claude  && mkdir -p /feed /work  && chown claude:claude /work
---> Using cache 5e43f5dda4094f29310fff71d525e5fb3f1aa29367cc57a4d67e55ea8d326536
---> 5e43f5dda409
-STEP 5/14: COPY bb.edn /opt/devops.bb/bb.edn
---> 5e0d4ef27aaf
-STEP 6/14: COPY src /opt/devops.bb/src
---> 48cb1ccaee8d
-STEP 7/14: COPY bin /opt/devops.bb/bin
---> 05966e424f02
-STEP 8/14: RUN ln -s /opt/devops.bb/bin/devops-bb /usr/local/bin/devops-bb
---> 20e61f93fab0
-STEP 9/14: COPY --chown=claude:claude sandbox/skills /home/claude/.claude/skills
---> 0c409977c8e0
-STEP 10/14: USER claude
---> cc5e83b0557a
-STEP 11/14: ENV DEVOPS_BB_FEED=/feed
---> 2f2b3a9d1d86
-STEP 12/14: WORKDIR /work
---> ed7771793864
-STEP 13/14: RUN devops-bb tasks >/dev/null
-Cloning: https://github.com/kpassapk/charm.clj.git
-Downloading: org/clojure/clojure/1.12.5/clojure-1.12.5.pom from central
-Checking out: https://github.com/kpassapk/charm.clj.git at b1b40757fc12e82da87c13c362c8c5308c33df3f
-Downloading: org/clojure/core.async/1.8.741/core.async-1.8.741.pom from central
-Downloading: org/jline/jline-terminal-ffm/4.0.10/jline-terminal-ffm-4.0.10.pom from central
-Downloading: org/clojure/core.specs.alpha/0.4.74/core.specs.alpha-0.4.74.pom from central
-Downloading: org/clojure/spec.alpha/0.5.238/spec.alpha-0.5.238.pom from central
-Downloading: org/jline/jline-parent/4.0.10/jline-parent-4.0.10.pom from central
-Downloading: org/clojure/pom.contrib/1.2.0/pom.contrib-1.2.0.pom from central
-Downloading: org/jline/jline-reader/4.0.10/jline-reader-4.0.10.pom from central
-Downloading: org/clojure/tools.analyzer.jvm/1.3.2/tools.analyzer.jvm-1.3.2.pom from central
-Downloading: org/jline/jline-terminal/4.0.10/jline-terminal-4.0.10.pom from central
-Downloading: org/ow2/asm/asm/9.2/asm-9.2.pom from central
-Downloading: org/ow2/ow2/1.5/ow2-1.5.pom from central
-Downloading: org/clojure/core.memoize/1.1.266/core.memoize-1.1.266.pom from central
-Downloading: org/clojure/tools.analyzer/1.2.0/tools.analyzer-1.2.0.pom from central
-Downloading: org/clojure/tools.reader/1.5.0/tools.reader-1.5.0.pom from central
-Downloading: org/clojure/core.cache/1.1.234/core.cache-1.1.234.pom from central
-Downloading: org/clojure/data.priority-map/1.2.0/data.priority-map-1.2.0.pom from central
-Downloading: org/clojure/clojure/1.12.5/clojure-1.12.5.jar from central
-Downloading: org/ow2/asm/asm/9.2/asm-9.2.jar from central
-Downloading: org/jline/jline-terminal-ffm/4.0.10/jline-terminal-ffm-4.0.10.jar from central
-Downloading: org/clojure/tools.analyzer/1.2.0/tools.analyzer-1.2.0.jar from central
-Downloading: org/clojure/spec.alpha/0.5.238/spec.alpha-0.5.238.jar from central
-Downloading: org/clojure/tools.analyzer.jvm/1.3.2/tools.analyzer.jvm-1.3.2.jar from central
-Downloading: org/clojure/core.specs.alpha/0.4.74/core.specs.alpha-0.4.74.jar from central
-Downloading: org/clojure/tools.reader/1.5.0/tools.reader-1.5.0.jar from central
-Downloading: org/clojure/core.memoize/1.1.266/core.memoize-1.1.266.jar from central
-Downloading: org/jline/jline-reader/4.0.10/jline-reader-4.0.10.jar from central
-Downloading: org/clojure/core.cache/1.1.234/core.cache-1.1.234.jar from central
-Downloading: org/clojure/data.priority-map/1.2.0/data.priority-map-1.2.0.jar from central
-Downloading: org/clojure/core.async/1.8.741/core.async-1.8.741.jar from central
-Downloading: org/jline/jline-terminal/4.0.10/jline-terminal-4.0.10.jar from central
---> f72a962d9db7
-STEP 14/14: CMD ["sleep", "infinity"]
-COMMIT devops-bb-sandbox
---> 25c761052b49
-Successfully tagged localhost/devops-bb-sandbox:latest
-25c761052b4938f8232d4f870fb30ac4169872a7ec0cc2fd18aec9b269cd29aa
-#+end_example
+: 26a79020-f430-4930-9cd3-9c4bf3647a17
+
+#+begin_src elisp :results value pp
+  (global-auto-revert-mode 1)
+
+  (setq devops-bb-sandbox-sinks
+      `(("user" :via "podman exec -i -u root user" :to "/feed"
+         :map ((,(file-name-directory (directory-file-name buffer-file-name)) . "/work")))))
+#+end_src
+
+#+RESULTS:
+: (("user" :via "podman exec -i -u root user" :to "/feed" :map
+:   (("/Users/kyle/src/github.com/kpassapk/devops.bb/user/" . "/work"))))
+
+Run =M-x devops-bb-sandbox-attach=
+
+* Scratch                                                           :project:
+
+Create and run code blocks here
+
+* Teardown                                                          :project:
+
+#+begin_src sh
+  podman stop user
+#+end_src
+
+#+RESULTS:
+: user
+
+#+begin_src sh
+  podman rm user
+#+end_src
+
+#+RESULTS:
+: user

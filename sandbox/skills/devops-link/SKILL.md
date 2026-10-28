@@ -54,6 +54,10 @@ Monitor({
 })
 ```
 
+Monitor is a deferred tool: if it is only named in a system reminder,
+load it first with `ToolSearch({query: "select:Monitor"})`. Don't
+conclude you have no Monitor until that search comes back empty.
+
 Keep exactly one running. A Monitor ends after 30 minutes at most, or
 when `follow` exits: whenever it ends, start it again, the same way,
 before you do anything else. `follow` resumes after the last seq you
