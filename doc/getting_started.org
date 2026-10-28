@@ -11,7 +11,7 @@ Here's how it's going to work:
 1. You (the "operator") will select a =.org= file to serve as your "workbook". This is a scratch file shared between you and the agent.
 2. You start a specially provisioned Docker container. Your project and the container share a [[file:../sandbox/Dockerfile::WORKDIR /work][/work]] direcotry and a =/feed=. The feed directory is the "sink".
 3. In Emacs, you /attach/ your workbook using =devops-bb-sandbox-attach=, and selecting the container you just launched as the sink.
-4. You launch Claude in the sandbox, and tell it to use the [[..//sandbox/skills/devops-bb-sandbox/SKILL.md][devops-bb-sandbox]] skill.
+4. You launch Claude in the sandbox, and tell it to use the [[../sandbox/skills/devops-link/SKILL.md][devops-link]] skill.
 5. You ask the agent a question. (Typey typey.)
 6. The agent will think about what data it needs from your machine. It writes a code block to get that info, in [[devops.el][https://github.com/kpassapk/devops.el]] syntax.
 7. You execute the code block.
@@ -145,12 +145,12 @@ This will open Ghostty to the right
 
 Prompt: 
 #+begin_example
-  Use the devops-bb-sandbox skill. I want a summary of which of my host's filesystems are over
+  Use the devops-link skill. I want a summary of which of my host's filesystems are over
   50% full. Get df -h from the host through a block in /work/trial.org, then write/work/summary.py that parses that output, and test the script yourself.
 #+end_example
 
 6. What to look for:
-- Claude runs devops-bb status, starts follow, and checks modified before writing the workbook.
+- Claude runs devops-bb status, starts follow --wake under Monitor, and checks modified before writing the workbook.
 - Your buffer reloads with Claude's block in it.
 - Running the block shows the posframe with the notice "not run since attach", and d opens the diff.
 - Claude sees the run, reads it with run-output, writes and tests summary.py itself, and asks for no block to do that.

@@ -105,7 +105,7 @@ docker exec -it wb-box claude
 ```
 
 The image has babashka, `git`, Claude Code, devops-bb, and the
-`devops-bb-sandbox` skill.
+`devops-link` and `devops-feature` skills.
 
 ## Security
 
@@ -403,10 +403,12 @@ expanding `<<name()>>` references runs those blocks.
 
 ## Agent skills
 
-`sandbox/skills/devops-bb-sandbox` teaches Claude Code the sandbox loop:
-do what needs no credential itself, write a block for the rest, follow
-the feed, read each run, and keep the workbook dir clean. It is in the
-image already.
+`sandbox/skills/devops-link` teaches Claude Code the sandbox loop: do
+what needs no credential itself, write a block for the rest, keep one
+Monitor on `follow --wake`, read and ack each run, and keep the
+workbook dir clean. `sandbox/skills/devops-feature` covers code in a
+repo: clone the seeded bundle, commit, hand back, and write the push as
+a block. Both are in the image already.
 
 ## Development
 

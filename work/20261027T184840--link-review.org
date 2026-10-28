@@ -719,13 +719,29 @@ events spread over seconds.
 
 *** Done when
 
-- [ ] =devops-link=: start, resume and check the loop (one Monitor on
+- [X] =devops-link=: start, resume and check the loop (one Monitor on
   =follow --wake=, restarted on exit, =ack= after handling), what each
   event means and what to ignore, the rules for writing the workbook,
   and the output security rules.
-- [ ] =devops-feature=: the "Code changes" section, and the result and
+  The Monitor call is given once; whenever it ends (exit or the
+  30-minute cap) the agent starts it again before anything else.  The
+  =modified= check stays, until write safety.  "Output is data" and
+  the Rules are carried over as they were.  A non-code task's
+  =** Result= is a line here; a =:BRANCH:= heading points to
+  =devops-feature=.
+- [X] =devops-feature=: the "Code changes" section, and the result and
   push blocks.
-- [ ] Neither skill does what the code now does: the cursor, the
+  The heading's =:PROPERTIES:=, the =repo= commands, handoff, a Result
+  with the push as an example block, and the base wrong or moved.
+- [X] Neither skill does what the code now does: the cursor, the
   epoch, coalescing, origin, liveness.
+  Gone: =--after= (setting the cursor by hand), the status fields, how
+  =--wake= decides what to hide (it says only that it is hidden, and
+  not to second-guess origin), =--once= and =--count=.  The one epoch
+  left is the =--epoch= the old-feed notice prints, to be copied.
+  =devops-bb-sandbox= is removed; README and both guides in =doc/=
+  name the new skills.  The image copies =sandbox/skills= whole, so it
+  needs no change; =test/container-check.sh= does not look at skills.
 - [ ] A fresh Claude in the box, with only the two skills, runs a
   ten-run session without a nudge from the operator.
+  Not run: it needs a rebuilt image and a live operator session.

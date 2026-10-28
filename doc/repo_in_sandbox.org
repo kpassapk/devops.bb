@@ -81,7 +81,7 @@ then, read the log with =bundle land= before you run a push block.
 Do the build, Emacs and sandbox-sink steps of
 [[file:getting_started.org][getting_started.org]] first (the image =devops-bb-sandbox=, Emacs with
 =ob-confirm-posframe-mode=). Rebuild the image if it is older than this
-guide: it has the =repo-*= tasks and the skill.
+guide: it has the =repo-*= tasks and the skills.
 
 Check out bb-slug:
 
@@ -223,11 +223,11 @@ With point in the block below, try =devops-run-in-terminal=
 Prompt:
 
 #+begin_example
-  Use the devops-bb-sandbox skill. Do the heading "Fold accents" in
+  Use the devops-link and devops-feature skills. Do the heading "Fold accents" in
   /work/work.org.
 #+end_example
 
-The "what" is the heading, and the "how" is the skill.
+The "what" is the heading, and the "how" is the skills.
 
 What to look for:
 - Claude runs =devops-bb status=, then =repo clone --heading "Fold
