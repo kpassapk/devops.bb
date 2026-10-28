@@ -11,7 +11,15 @@
   Two threads, so Emacs never waits: the reader drains stdin into a
   queue, capping each output as it takes it, and numbers the events;
   the writer pushes them to the sink in order, retrying with backoff.
-  A sink that hangs fills the queue, never the pipe."
+  A sink that hangs fills the queue, never the pipe.
+
+  Each event carries the feed's epoch, its `started'.  A new feed keeps
+  the old events.jsonl, as the old epoch's file, and the file of the
+  epoch the agent's cursor is in; the rest go.  With --cursors DIR, the
+  dir where the agent keeps its cursor, as `devops-bb ack' writes it,
+  read through the sink, the heartbeat also prints `{\"behind\":N}' on
+  stdout whenever N, the events pushed and not acked, changes: Emacs
+  shows it in the mode line."
   (:require
    [babashka.fs :as fs]
    [cheshire.core :as json]
@@ -142,9 +150,10 @@
           (:truncated a) (assoc :truncated true :lines (:lines a) :bytes (:bytes a)))))))
 
 (defn item
-  "What the writer pushes for entry E, numbered SEQ:
+  "What the writer pushes for entry E, numbered SEQ, in the feed (:epoch
+  OPTS):
   {:seq n :id id :output json-or-nil :event json-line}."
-  [e seq-n {:keys [maps name] :as opts}]
+  [e seq-n {:keys [maps name epoch] :as opts}]
   (let [a  (answer e opts)
         id (or (:id a) (:id e))
         a  (when a
@@ -155,7 +164,7 @@
         ev (cond-> (dissoc e :output)
              (string? (:output e)) (dissoc :input)
              (:file e)             (update :file #(map-path maps %))
-             true                  (assoc :seq seq-n :feed name))]
+             true                  (assoc :seq seq-n :feed name :epoch epoch))]
     {:seq    seq-n
      :id     id
      :output (some-> a json/generate-string)
@@ -220,12 +229,50 @@
   (swap! state assoc :eof true)
   (.put q ::eof))
 
+(defn- acked
+  "The agent's cursor, {:epoch e :seq n}, read through the sink from
+  (:cursors OPTS); nil without one.  The agent writes it: only an epoch
+  string and a seq number are taken from it.  Throws when the sink does."
+  [{:keys [sink cursors name]}]
+  (when cursors
+    (let [s (feed/fetch sink (str (str/replace cursors #"/+$" "") "/" (feed/cursor-file name)))
+          {:keys [epoch seq]} (try (some-> s (json/parse-string true)) (catch Exception _ nil))]
+      (when (number? seq)
+        {:epoch (when (string? epoch) epoch) :seq (long seq)}))))
+
+(defn behind
+  "How many of the PUSHED events of the feed EPOCH the cursor ACKED is
+  short of: all of them unless it is in this feed."
+  [epoch pushed acked]
+  (if (= epoch (:epoch acked)) (max 0 (- pushed (:seq acked))) pushed))
+
+(defn- start-feed!
+  "Start the new feed: keep the old events.jsonl as its epoch's file,
+  and the one of the epoch the cursor is in, then put status.json.  The
+  old epoch is read from the old status.json.  Never the other way
+  round: a reader that sees the new epoch finds the old file in place."
+  [state {:keys [sink] :as opts}]
+  (let [s   (feed/fetch sink feed/status-file)
+        old (try (some-> s (json/parse-string true) :started) (catch Exception _ nil))]
+    (feed/rotate sink (when (string? old) old) [(:epoch (acked opts))]))
+  (put-status! opts state))
+
+(defn- report-behind!
+  "Print {\"behind\":N} on stdout when N changed since the last report."
+  [state opts]
+  (when (:cursors opts)
+    (let [{:keys [started pushed reported]} @state
+          n (behind started pushed (acked opts))]
+      (when (not= n reported)
+        (swap! state assoc :reported n)
+        (println (json/generate-string {:behind n}))
+        (flush)))))
+
 (defn- write-items!
   "Start a new feed, then push Q's items to the sink in order: each
   output before its event."
   [^LinkedBlockingQueue q state {:keys [sink] :as opts}]
-  (retry! "starting the feed" #(feed/put sink feed/events-file ""))
-  (retry! "status.json" #(put-status! opts state))
+  (retry! "starting the feed" #(start-feed! state opts))
   (loop []
     (let [x (.take q)]
       (when-not (= ::eof x)
@@ -263,7 +310,9 @@
                      :maps (parse-maps (:map opts))
                      :name (or (:name opts) (fs/file-name (fs/absolutize (:to opts))))
                      :status-lock (Object.))
-        state (atom {:started (now) :enqueued 0 :pushed 0 :dropped 0 :eof false
+        started (now)
+        opts  (assoc opts :epoch started)
+        state (atom {:started started :enqueued 0 :pushed 0 :dropped 0 :eof false
                      :workbook nil :devops-mode nil})
         q     (LinkedBlockingQueue.)
         done  (promise)]
@@ -278,6 +327,7 @@
                (Thread/sleep (:heartbeat-ms opts))
                (when-not (realized? done)
                  (try (put-status! opts state)
+                      (report-behind! state opts)
                       (catch Exception ex (warn "heartbeat:" (ex-message ex))))
                  (recur))))
     {:state state :queue q :done done :opts opts}))

@@ -37,6 +37,11 @@
   A publisher that dies while attached shows `sandbox: DEAD' in the
   mode line; attaching again offers to restart it, as a new feed.
 
+  With the sink's :cursors, where the agent keeps its cursor, the
+  publisher prints `{\"behind\":N}' whenever N, the events it pushed
+  that the agent has not acked, changes, and the mode line says `agent
+  behind by N'.
+
   Each run in an attached buffer is reviewed, by devops-bb-review.el:
   confirmed unless unchanged, elisp in its headers refused, its
   directory checked.  A directory that fails the check suspends the
@@ -61,6 +66,10 @@ PLIST holds the publisher's flags:
                    sees them, for --map
   :max-lines N     the publisher's caps on one output
   :max-bytes N
+  :cursors DIR     where the agent's cursor is, as `devops-bb ack'
+                   writes it, e.g. \"/home/claude/.cache/devops-bb/cursor\";
+                   read through :via, for the mode line's `agent behind
+                   by N'
 
 A sink takes one workbook at a time.  Set here, in Emacs, and never in
 a workbook: Claude writes the workbook, and a sink there could point
@@ -79,6 +88,7 @@ The sink's flags follow them."
        "Base buffer to its attachment, a map: :sink, the sink's name;
 :feed; :process, the publisher; :subscriber; :file, the file the
 publisher was last told of; :dead, once the publisher died attached;
+:behind, the events the agent has not acked, as the publisher last said;
 :review, devops-bb-review.el's state, kept here so a revert keeps it.
 Global, not buffer-local: `revert-buffer' kills buffer-locals.")
 
@@ -216,7 +226,8 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
   (let [to (el/plist-get flags :to)
         via (el/plist-get flags :via)
         max-lines (el/plist-get flags :max-lines)
-        max-bytes (el/plist-get flags :max-bytes)]
+        max-bytes (el/plist-get flags :max-bytes)
+        cursors (el/plist-get flags :cursors)]
     (when (el/plist-get flags :ssh)
       (el/user-error "Sinks with :ssh are not supported yet"))
     (when-not to (el/user-error "The sink has no :to"))
@@ -228,6 +239,7 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
                     (el/plist-get flags :map))
             (when max-lines ["--max-lines" (str max-lines)])
             (when max-bytes ["--max-bytes" (str max-bytes)])
+            (when cursors ["--cursors" (if via cursors (el/expand-file-name cursors))])
             ["--name" feed])))
 
 (defn- start!
@@ -243,9 +255,29 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
                                (publish-args flags feed))
               :connection-type 'pipe
               :noquery true
+              :filter 'devops-bb-sandbox--on-output
               :sentinel 'devops-bb-sandbox--sentinel)]
     (el/process-put proc 'devops-bb-sandbox-buffer buffer)
     proc))
+
+(defn- on-output
+  "Keep what the publisher PROC prints in its buffer, and take the last
+  `{\"behind\":N}' line, the events the agent has not acked, for the
+  mode line."
+  [proc text]
+  (let [buf (el/process-buffer proc)
+        n (when (el/buffer-live-p buf)
+            (el! (with-current-buffer (clj! buf)
+                   (save-excursion
+                     (goto-char (point-max))
+                     (insert (clj! text))
+                     (when (re-search-backward "^{\"behind\":\\([0-9]+\\)}$" nil t)
+                       (string-to-number (match-string 1)))))))
+        buffer (el/process-get proc 'devops-bb-sandbox-buffer)
+        att (el/gethash buffer el/devops-bb-sandbox--registry)]
+    (when (and n att (el/eq (:process att) proc) (not= n (:behind att)))
+      (el/puthash buffer (assoc att :behind n) el/devops-bb-sandbox--registry)
+      (el/force-mode-line-update true))))
 
 (defn- sentinel
   "Mark the attachment dead when its publisher exits while attached.
@@ -277,6 +309,9 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
     (str " sandbox: "
          (cond (:dead att) (el/propertize "DEAD" 'face 'error)
                (el/devops-bb-review-suspended) (el/propertize "SUSPENDED" 'face 'error)
+               (and (:behind att) (> (:behind att) 0))
+               (str (:feed att) ", "
+                    (el/propertize (str "agent behind by " (:behind att)) 'face 'warning))
                :else (:feed att))
          " ")))
 

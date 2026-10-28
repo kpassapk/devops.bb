@@ -536,24 +536,49 @@ jq -c '{started}' "$d/status.a.json" "$d/status.json"; cat "$d/events.jsonl"
 The answer decides where the old tail goes (=events.<epoch>.jsonl=
 beside the new one) so a re-attach loses nothing.
 
+Result: emptied first, then the new =started=.  =write-items!= put an
+empty =events.jsonl=, then =status.json=; after the second publisher
+=events.jsonl= held only the new feed's
+={"type":"modify","file":"x","seq":1,"feed":"feedXXXX"}=, and nothing
+of the old feed was left.  Between the two puts a reader saw the old
+=started= with an empty file.  So the new publisher now reads the old
+=started= through the sink, moves the old file to
+=events.<old-epoch>.jsonl= in the sink (one =mv= under =--via=), and
+only then puts the new =status.json=.  The window is still there, but
+harmless: =follow= keys on the epoch each event carries, not on the
+file getting shorter.  Kept: the old feed's file, and the one of the
+epoch the agent's cursor is in; the rest are removed, so at most two.
+
 *** Done when
 
-- [ ] Every event carries =epoch= (the feed's =started=).  The cursor
+- [X] Every event carries =epoch= (the feed's =started=).  The cursor
   is ={epoch, seq}=.
-- [ ] =follow= keeps the cursor in =~/.cache/devops-bb/cursor/<feed>.json=
+- [X] =follow= keeps the cursor in =~/.cache/devops-bb/cursor/<feed>.json=
   and resumes from it by default.  =--after N= still works, and sets
-  the cursor.
-- [ ] An epoch that doesn't match the cursor's replays the new feed
+  the cursor.  With no cursor, =follow= starts at seq 1 of the feed,
+  no longer at its end.
+- [X] An epoch that doesn't match the cursor's replays the new feed
   from seq 0 and prints =! feed restarted …=, on the first poll too
-  (the =--after 5= repro from [[*Details][Details]] is a test).
-- [ ] =devops-bb ack SEQ= moves the cursor; =follow= moves it only
+  (the =--after 5= repro from [[*Details][Details]] is a test,
+  =after-restart-test=).
+- [X] =devops-bb ack SEQ= moves the cursor; =follow= moves it only
   past events it was told were handled.  Delivery is at-least-once.
-- [ ] A re-attach keeps the old feed's unacked tail where =follow=
-  reads it before the new feed.
-- [ ] The ack lands where the host can read it (not a dotfile in
-  =/work=), and the mode line shows "agent behind by N".
+  =follow= keeps where it read in memory; only =ack= and =--after=
+  write the cursor.  =ack SEQ --epoch E= acks in an old feed's tail.
+- [X] A re-attach keeps the old feed's unacked tail where =follow=
+  reads it before the new feed: =! the rest of feed E, which has
+  ended: seq A-B …=, those events, then the restart notice.
+- [X] The ack lands where the host can read it (not a dotfile in
+  =/work=), and the mode line shows "agent behind by N".  Not in the
+  feed dir, as first thought: Claude cannot write =/feed=, which is
+  read-only or root's.  The cursor file is the ack; the publisher
+  reads it through the sink (=--cursors DIR=, the sink's =:cursors=,
+  =cat= under =--via=) at each heartbeat and prints ={"behind":N}= on
+  stdout, which the Emacs side puts in the mode line.  A mounted feed
+  with no =--via= needs the cursor dir mounted too.
 - [ ] Experiment 1, re-run with the agent left alone (no nudges),
   passes: no events missed across a =/compact= and a re-attach.
+  Not run: it needs a podman box and a live Claude.
 
 ** TODO 3. Publisher: a seq gap for drops, staleness on one clock
 :PROPERTIES:

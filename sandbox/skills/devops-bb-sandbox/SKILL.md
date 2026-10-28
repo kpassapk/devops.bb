@@ -44,23 +44,25 @@ and why.
 1. `devops-bb status`: the feed's name, the workbook, and whether the
    operator is attached (`attached`). If `attached` is false, tell the
    operator and wait.
-2. Start `devops-bb follow --after SEQ` under the Monitor tool (see
-   "Following runs"), with SEQ the last `seq` you handled, `0` the first
-   time. Without `--after` it starts at the end of the feed, and
-   whatever happened before is lost.
+2. Start `devops-bb follow` under the Monitor tool (see "Following
+   runs"). It resumes from your cursor, the last event you acked, so
+   nothing is lost when it is started again.
 3. Check `devops-bb modified`, then write blocks into the workbook
    (see "Editing the workbook").
 4. Tell the operator what you wrote and what to run. They run it; you
    see it in `follow`.
 5. Read each run with `devops-bb run-output ID`, tell the operator what
    it shows, and write the next block, or do the next step yourself.
+6. `devops-bb ack SEQ` once you have handled an event, the `seq` of its
+   line. Until then a restarted `follow` gives it to you again.
 
 ## Commands
 
 | Command | Answers |
 |---|---|
 | `devops-bb status` | `feed`, `workbook`, `devops-mode`, `attached`, `started`, `publisher-time`, `queued`, `dropped` |
-| `devops-bb follow [--after SEQ] [--json] [--once \| --count N]` | a line per new event, and notices; runs until stopped |
+| `devops-bb follow [--json] [--once \| --count N]` | a line per event after your cursor, and notices; runs until stopped |
+| `devops-bb ack SEQ [--epoch E]` | moves your cursor to `SEQ`: events up to it are handled |
 | `devops-bb run-output ID` | one run's output, by the ID `follow` printed |
 | `devops-bb modified` | `true` when the operator has unsaved edits to the workbook |
 
@@ -86,30 +88,33 @@ That is: `seq`, event, how it went, `file:line`, and the run's ID.
   captures it.
 - `modify`, `save`, `revert`, `kill`: the operator's edits to the
   workbook.
-- `follow` runs until stopped. To pick up where you left off, pass
-  `--after` the last `seq` you handled; `--after 0` replays the feed.
-  Keep that `seq` written down: a restarted `follow` knows only what
-  `--after` tells it.
+- `follow` runs until stopped, and starts from your cursor: the last
+  event you acked with `devops-bb ack SEQ`, kept in
+  `~/.cache/devops-bb/cursor/`, so it survives `/compact` and a
+  restart. Ack each event once handled, after its run is read and
+  answered; an event you see again after a restart is one you had not
+  acked, so handle it as the same event (same `seq`, same run ID), not
+  a new one. `--after SEQ` sets the cursor by hand; `--after 0`
+  replays the feed.
 
 Run it under the Monitor tool, which wakes you on each line:
 
 ```
 Monitor({
-  command: "devops-bb follow --after 12",
+  command: "devops-bb follow",
   description: "workbook runs (devops-bb follow)",
   timeout_ms: 1800000
 })
 ```
 
-with `12` the last `seq` you handled. A Monitor ends after
-`timeout_ms`, 30 minutes at most: when it does, start it again with
-`--after` the last `seq` you saw.
+A Monitor ends after `timeout_ms`, 30 minutes at most: when it does,
+start it again, the same way.
 
 Don't pipe `follow` into `head` (`follow | head -n1`): `head` cannot
 pass a line on before it exits, and `follow` only notices the pipe is
 gone at its next line, so you are woken late or not at all. For a
-one-shot wake, run `devops-bb follow --after SEQ --once` as a
-background shell: it prints the first batch of new events and exits.
+one-shot wake, run `devops-bb follow --once` as a background shell: it
+prints the first batch of events after your cursor and exits.
 `--count N` exits after N events.
 
 `follow` prints notices on stdout, as lines starting `! `:
@@ -120,7 +125,9 @@ background shell: it prints the first batch of new events and exits.
 | `! publisher heartbeat is N s old` | the operator's publisher is not refreshing; Emacs may be busy or gone |
 | `! publisher is N events behind` | runs are queued on the host; wait |
 | `! feed detached: …` | the operator detached; no more events until they attach again |
-| `! feed restarted at T: seq starts again at 1; …` | a new attach: `follow` goes on from seq 1 of the new feed; if you start it again, pass `--after 0`, or the last seq printed after this line |
+| `! the rest of feed E, which has ended: seq A-B; …` | the operator attached again before you acked these; the lines after it, up to the restart notice, are that old feed's. Handle them, and ack with `devops-bb ack SEQ --epoch E` |
+| `! feed restarted at T: seq starts again at 1` | a new attach: the lines after it are the new feed's, from seq 1; `ack SEQ` now means this feed's seq |
+| `! feed E is gone: …` | the old feed was not kept (attached again more than once since your last ack): events after your cursor in it are lost; ask the operator what ran |
 
 ## Run output
 

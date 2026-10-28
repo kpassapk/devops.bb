@@ -1253,6 +1253,36 @@ big it was."
         (should (= 1 (length (devops-bb-test--events
                               (devops-bb-test--stdin root "a") "execute"))))))))
 
+(ert-deftest devops-bb-sandbox-behind-test ()
+  "The sink's :cursors goes to the publisher, and its `{\"behind\":N}'
+lines show in the mode line; the rest stays in its buffer."
+  (devops-bb-test--with-sandbox root
+    (devops-bb-test--sink root "a" :cursors "/home/claude/.cache/devops-bb/cursor")
+    (let ((devops-bb-sandbox-publish-command
+           (list "sh" "-c"
+                 (concat "mkdir -p \"$2\" && printf '%s\\n' \"$@\" > \"$2/args\";"
+                         " echo '{\"behind\":3}'; echo 'publish: a warning'; cat > /dev/null")
+                 "fake-publish"))
+          (buf (devops-bb-test--visit root "wb" devops-bb-test--elisp-block)))
+      (with-current-buffer buf
+        (devops-bb-sandbox-attach "a" "wb")
+        (should (devops-bb-test--wait
+                 (lambda () (string-match-p "sandbox: wb, agent behind by 3"
+                                            (devops-bb-sandbox--mode-line)))))
+        (let ((proc (gethash :process (devops-bb-sandbox-attachment))))
+          (should (string-match-p "publish: a warning"
+                                  (with-current-buffer (process-buffer proc) (buffer-string))))
+          (devops-bb-sandbox--on-output proc "{\"behind\":0}\n")
+          (should (equal (devops-bb-sandbox--mode-line) " sandbox: wb ")))
+        (devops-bb-test--detach buf))
+      (should (member "--cursors=/home/claude/.cache/devops-bb/cursor"
+                      (let ((args (split-string (with-temp-buffer
+                                                  (insert-file-contents
+                                                   (expand-file-name "feeds/a/args" root))
+                                                  (buffer-string))
+                                                "\n" t)))
+                        (cl-mapcar (lambda (a b) (concat a "=" b)) args (cdr args))))))))
+
 (ert-deftest devops-bb-sandbox-quit-test ()
   "Quitting Emacs closes each publisher's stdin and waits for it a while."
   (devops-bb-test--with-sandbox root

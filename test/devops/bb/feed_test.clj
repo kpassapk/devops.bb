@@ -27,11 +27,13 @@
     dir))
 
 (defn bb-env
-  "This environment, with FAKE first on PATH and no Emacs socket."
+  "This environment, with FAKE first on PATH, no Emacs socket, and the
+  cursors in FAKE/cursor, not ~/.cache."
   [fake extra]
   (-> (into {} (System/getenv))
       (dissoc "EMACS_SOCKET_NAME" "DEVOPS_BB_FEED")
-      (assoc "PATH" (str fake ":" (System/getenv "PATH")))
+      (assoc "PATH" (str fake ":" (System/getenv "PATH"))
+             "DEVOPS_BB_CURSOR_DIR" (str (fs/path fake "cursor")))
       (merge extra)))
 
 (def bb-edn (str (fs/absolutize "bb.edn")))
@@ -123,11 +125,14 @@
 ;;; The publisher
 
 (defn- recording-sink
-  "A sink that records its calls in OPS, an atom, and calls BEFORE first."
+  "A sink that records its calls in OPS, an atom, and calls BEFORE first.
+  It holds no files: `fetch' finds none."
   [ops before]
   (reify feed/Sink
     (put [_ path s] (before :put path) (swap! ops conj [:put path s]))
-    (append [_ line] (before :append line) (swap! ops conj [:append line]))))
+    (append [_ line] (before :append line) (swap! ops conj [:append line]))
+    (rotate [_ epoch keep] (before :rotate epoch) (swap! ops conj [:rotate epoch keep]))
+    (fetch [_ _] nil)))
 
 (defn- lines-in [& entries]
   (java.io.StringReader. (str/join (map #(str (json/generate-string %) "\n") entries))))
@@ -140,12 +145,17 @@
                                                  {:event "result" :id id1 :file "/w/a.org"
                                                   :output {:session "s" :status "done" :id id1 :output "hi"}}))]
     (is (deref done 5000 false))
-    (is (= [[:put "events.jsonl"] [:put "status.json"]
+    (is (= [[:rotate nil] [:put "status.json"]
             [:append 1] [:put (feed/output-file id1)] [:append 2]
             [:put "status.json"]]
            (mapv (fn [[op x s]]
                    (if (= :append op) [op (:seq (json/parse-string x true))] [op x]))
                  @ops)))
+    (testing "every event carries the feed's epoch, its started"
+      (let [started (:started (json/parse-string (nth (last @ops) 2) true))]
+        (is (string? started))
+        (is (= [started started]
+               (keep (fn [[op x]] (when (= :append op) (:epoch (json/parse-string x true)))) @ops)))))
     (testing "attached is false at EOF"
       (is (false? (:attached (json/parse-string (last (last @ops)) true)))))))
 
@@ -263,11 +273,21 @@
         (testing "and resuming after a seq"
           (is (= [3] (map :seq (:events (feed/events-after dir {:seq 2})))))
           (is (= [] (:events (feed/events-after dir r)))))
-        (testing "a new feed starts again from seq 1"
-          (spit (str (fs/path dir "events.jsonl")) (str (ev 1) "\n"))
-          (let [r2 (feed/events-after dir r)]
-            (is (:reset r2))
-            (is (= [1] (map :seq (:events r2))))))))
+        (testing "a file shorter than the offset is read from the start"
+          (spit (str (fs/path dir "events.jsonl")) (str (ev 4) "\n"))
+          (is (= [4] (map :seq (:events (feed/events-after dir r))))))))
+    (testing "by epoch: a later one is a new feed, an earlier one skipped"
+      (let [ev (fn [ep n] (json/generate-string {:event "save" :seq n :epoch ep}))
+            a  "2026-10-19T10:00:00-06:00"
+            b  "2026-10-19T11:00:00-06:00"]
+        (spit (str (fs/path dir "events.jsonl")) (str/join (map #(str % "\n") [(ev b 1) (ev a 9) (ev b 2)])))
+        (let [r (feed/events-after dir {})]
+          (is (= [1 2] (map :seq (:events r))))
+          (is (= b (:epoch r)))
+          (is (nil? (:new-epoch r))))
+        (let [r (feed/events-after dir {:epoch a :seq 5})]
+          (is (= [] (:events r)))
+          (is (= b (:new-epoch r))))))
     (testing "output by ID"
       (is (nil? (feed/output dir id1)))
       (feed/put (feed/local-dir dir) (feed/output-file id1) "{\"id\":1}")
@@ -277,6 +297,97 @@
       (is (nil? (feed/status dir)))
       (feed/put (feed/local-dir dir) "status.json" "{\"feed\":\"wb\"}")
       (is (= {:feed "wb"} (feed/status dir))))))
+
+;;; A new feed keeps the old one
+
+(def ^:private ep-a "2026-10-19T10:00:00-06:00")
+(def ^:private ep-b "2026-10-19T11:00:00-06:00")
+(def ^:private ep-c "2026-10-19T12:00:00-06:00")
+
+(defn- event-files [dir] (set (map fs/file-name (fs/glob dir "events*.jsonl"))))
+
+(deftest rotate-test
+  (doseq [[what sink-of] [["a local dir" feed/local-dir] ["--via" #(feed/via "env" %)]]]
+    (testing what
+      (let [dir (temp-dir)
+            s   (sink-of dir)
+            ev  #(slurp (str (fs/path dir %)))]
+        (testing "no old feed: an empty events.jsonl"
+          (feed/rotate s nil [])
+          (is (= #{"events.jsonl"} (event-files dir))))
+        (feed/append s "{\"seq\":1}")
+        (testing "the old events.jsonl becomes its epoch's file"
+          (feed/rotate s ep-a [])
+          (is (= #{"events.jsonl" (feed/rotated-file ep-a)} (event-files dir)))
+          (is (= "" (ev "events.jsonl")))
+          (is (= "{\"seq\":1}\n" (ev (feed/rotated-file ep-a)))))
+        (testing "the old feed's file is kept, and the cursor's; no others"
+          (feed/rotate s ep-b [ep-a])
+          (is (= #{"events.jsonl" (feed/rotated-file ep-a) (feed/rotated-file ep-b)} (event-files dir)))
+          (feed/rotate s ep-c [nil])
+          (is (= #{"events.jsonl" (feed/rotated-file ep-c)} (event-files dir))))
+        (testing "fetch: a file, relative or absolute, or nil"
+          (feed/put s feed/status-file "{\"feed\":\"wb\"}")
+          (is (= "{\"feed\":\"wb\"}" (feed/fetch s feed/status-file)))
+          (is (= "{\"feed\":\"wb\"}" (feed/fetch s (str (fs/path dir feed/status-file)))))
+          (is (nil? (feed/fetch s "nope.json")))
+          (is (nil? (feed/fetch s "outputs"))))))))
+
+(deftest reattach-test
+  (let [dir  (str (fs/path (temp-dir) "feed"))
+        cur  (temp-dir)
+        pub! (fn [& entries]
+               @(:done (publish/start! {:to dir :name "wb" :cursors cur :heartbeat-ms 60000}
+                                       (apply lines-in entries)))
+               (Thread/sleep 2)
+               (:started (feed/status dir)))
+        a    (pub! {:event "save"} {:event "save"} {:event "save"})
+        b    (pub! {:event "modify"})]
+    (testing "a second publisher keeps the first feed, under its epoch"
+      (is (= #{"events.jsonl" (feed/rotated-file a)} (event-files dir)))
+      (is (= [[1 a] [2 a] [3 a]]
+             (map (juxt :seq :epoch) (:events (feed/events-after dir {:file (feed/rotated-file a)})))))
+      (is (= [[1 b]] (map (juxt :seq :epoch) (:events (feed/events-after dir {}))))))
+    (testing "tails: what is left of the feeds since the cursor"
+      (is (= [{:epoch a :events [3]}]
+             (map #(update % :events (partial map :seq)) (feed/tails dir a 2 b))))
+      (is (= [{:epoch "2026-01-01T00:00:00Z" :events [] :gone true}]
+             (feed/tails dir "2026-01-01T00:00:00Z" 0 a))))
+    (testing "a third keeps the second's, and the one the cursor is in"
+      (spit (str (fs/path cur (feed/cursor-file "wb"))) (json/generate-string {:epoch a :seq 2}))
+      (let [c (pub! {:event "save"})]
+        (is (= #{"events.jsonl" (feed/rotated-file a) (feed/rotated-file b)} (event-files dir)))
+        (is (= [{:epoch a :events [3]} {:epoch b :events [1]}]
+               (map #(update % :events (partial map :seq)) (feed/tails dir a 2 c)))
+            "and every event of a feed between")
+        (spit (str (fs/path cur (feed/cursor-file "wb"))) (json/generate-string {:epoch c :seq 1}))
+        (pub! {:event "save"})
+        (is (= #{"events.jsonl" (feed/rotated-file c)} (event-files dir)))))))
+
+(deftest behind-test
+  (is (= 2 (publish/behind "a" 3 {:epoch "a" :seq 1})))
+  (is (= 0 (publish/behind "a" 3 {:epoch "a" :seq 5})))
+  (is (= 3 (publish/behind "a" 3 {:epoch "z" :seq 9})))
+  (is (= 3 (publish/behind "a" 3 nil)))
+  (testing "the heartbeat prints it on stdout when it changes"
+    (let [dir     (str (fs/path (temp-dir) "feed"))
+          cur     (temp-dir)
+          out     (java.io.PipedOutputStream.)
+          in      (java.io.InputStreamReader. (java.io.PipedInputStream. out) "UTF-8")
+          printed (java.io.StringWriter.)
+          {:keys [state done]} (binding [*out* printed]
+                                 (publish/start! {:to dir :name "wb" :cursors cur :heartbeat-ms 50} in))]
+      (.write out (.getBytes (str/join (repeat 3 "{\"event\":\"save\"}\n")) "UTF-8"))
+      (.flush out)
+      (loop [n 0] (when (and (< (:pushed @state) 3) (< n 100)) (Thread/sleep 20) (recur (inc n))))
+      (spit (str (fs/path cur (feed/cursor-file "wb")))
+            (json/generate-string {:epoch (:started @state) :seq 1}))
+      (Thread/sleep 400)
+      (.close out)
+      (is (deref done 5000 false))
+      (let [lines (str/split-lines (str printed))]
+        (is (= "{\"behind\":2}" (last lines)))
+        (is (every? (fn [[x y]] (not= x y)) (partition 2 1 lines)) "only changes")))))
 
 ;;; --via CMD
 
@@ -356,7 +467,8 @@
       (fs/create-sym-link (fs/path root "b" "events.jsonl") (fs/path elsewhere "e"))
       (fs/create-sym-link (fs/path root "b" "status.json") (fs/path elsewhere "s"))
       (is (thrown-with-msg? Exception #"symlink" (feed/append (sink "b") "{}")))
-      (is (thrown-with-msg? Exception #"symlink" (feed/put (sink "b") "status.json" "{}"))))
+      (is (thrown-with-msg? Exception #"symlink" (feed/put (sink "b") "status.json" "{}")))
+      (is (thrown-with-msg? Exception #"symlink" (feed/rotate (sink "b") ep-a []))))
     (is (empty? (fs/list-dir elsewhere)) "nothing written where a link points")))
 
 (deftest via-retry-test
@@ -368,7 +480,7 @@
                                                     :output {:id id1 :output "hi"}})))]
     (is (deref done 10000 false))
     (testing "two failed calls, then each push once"
-      (is (= (+ 2 4) (calls via))))
+      (is (= (+ 2 5) (calls via))))
     (is (= [1] (map :seq (:events (feed/events-after to {})))))
     (is (= "hi" (:output (json/parse-string (feed/output to id1) true))))))
 
@@ -388,8 +500,8 @@
                       "--to" to "--map" "/h/w=/work" "--name" "wb")
         evs  (:events (feed/events-after to {}))]
     (is (zero? (:exit r)) (:err r))
-    (testing "one command per result: start, status, execute, two results, status"
-      (is (= 6 (calls via))))
+    (testing "one command per result: the old status, start, status, execute, two results, status"
+      (is (= 7 (calls via))))
     (is (= [1 2 3] (map :seq evs)))
     (is (every? #(= "/work/a.org" (:file %)) evs))
     (is (= "y\n" (:output (json/parse-string (feed/output to id2) true))))

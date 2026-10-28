@@ -20,8 +20,10 @@
               :exec-fn devops.bb.cli/run-output}
   sessions   {:doc "Live async sessions"
               :exec-fn devops.bb.cli/sessions}
-  follow     {:doc "[--dir D] [--json] [--after SEQ] [--once | --count N]: a line per new log event under D, or feed event; notices as `! ...'"
+  follow     {:doc "[--dir D] [--json] [--after SEQ] [--once | --count N]: a line per new log event under D, or feed event after the cursor; notices as `! ...'"
               :exec-fn devops.bb.cli/follow}
+  ack        {:doc "SEQ [--epoch E]: feed mode: events up to SEQ are handled; moves the cursor follow resumes from"
+              :exec-fn devops.bb.cli/ack}
   modified   {:doc "FILE: does Emacs hold unsaved edits to it (feed mode: FILE optional)"
               :exec-fn devops.bb.cli/modified}
   revert     {:doc "FILE: reload its buffer from disk"
@@ -30,7 +32,7 @@
               :exec-fn devops.bb.cli/tools}
   drift      {:doc "FILE [--heading H | --custom-id ID]: compare tangles with targets"
               :exec-fn devops.bb.cli/drift}
-  publish    {:doc "--to DIR [--via CMD] [--map HOST=SANDBOX] [--max-lines N] [--max-bytes N] [--name N]: stdin to a sandbox's feed"
+  publish    {:doc "--to DIR [--via CMD] [--map HOST=SANDBOX] [--max-lines N] [--max-bytes N] [--name N] [--cursors DIR]: stdin to a sandbox's feed"
               :exec-fn devops.bb.cli/publish}
 
   repo

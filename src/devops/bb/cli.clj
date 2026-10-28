@@ -8,8 +8,9 @@
 
   Feed mode, in a sandbox: with DEVOPS_BB_FEED=DIR or --feed DIR, never
   guessed, `status', `follow', `run-output' and `modified' read the feed
-  one attached workbook publishes there (devops.bb.feed), and every
-  other command fails: no command asks Emacs."
+  one attached workbook publishes there (devops.bb.feed), `ack' moves
+  the agent's cursor in it, and every other command fails: no command
+  asks Emacs."
   (:require
    [babashka.fs :as fs]
    [cheshire.core :as json]
@@ -171,10 +172,11 @@
 
 (defn publish
   "Push the JSON lines on stdin to the feed at --to, for one sandbox;
-  with --via CMD, CMD runs `sh' where the feed is"
+  with --via CMD, CMD runs `sh' where the feed is; with --cursors DIR,
+  read the agent's acks there and print how far behind it is"
   {:org.babashka/cli {:require [:to]
                       :coerce {:map [] :max-lines :long :max-bytes :long}
-                      :restrict [:to :via :map :max-lines :max-bytes :name]}}
+                      :restrict [:to :via :map :max-lines :max-bytes :name :cursors]}}
   [opts]
   (try
     (publish/run opts)
@@ -203,23 +205,41 @@
   (try (Duration/between (OffsetDateTime/parse time) now)
        (catch Exception _ nil)))
 
+(defn- tail-items
+  "Notices and events for what is left of the feeds from ST's epoch, up
+  to the feed NEW, oldest first."
+  [dir {:keys [epoch] after :seq} new]
+  (mapcat (fn [{e :epoch evs :events gone :gone}]
+            (cond
+              gone        [(str "feed " e " is gone: any events of it after seq " after " are lost")]
+              (seq evs)   (cons (str "the rest of feed " e ", which has ended: seq "
+                                     (:seq (first evs)) "-" (:seq (last evs))
+                                     "; ack these with --epoch " e)
+                                evs)))
+          (feed/tails dir epoch after new)))
+
 (defn feed-poll
   "One look at the feed at DIR, from ST, the last look's state, at NOW:
-  [st events notices].  EVENTS are the new ones, by seq; a notice says
-  once what the events cannot: the feed restarted, its heartbeat is
-  stale, the publisher is behind, or it is detached."
+  [st items], ITEMS the new events and notices, strings, in the order
+  to print them.  ST's :epoch and :seq are where reading is: the feed,
+  by its `started', and the last seq read.
+
+  A later epoch, in status.json or on an event, is a new feed: what is
+  left of the old one comes first, then a notice, then the new feed
+  from seq 1, on the first look too.  A notice also says once what the
+  events cannot: the heartbeat is stale, the publisher is behind, or it
+  is detached."
   [dir st now]
   (let [{:keys [started attached publisher-time queued] :as status} (feed/status dir)
-        restart? (and started (:started st) (not= started (:started st)))
-        ;; The publisher empties events.jsonl before it writes the new
-        ;; started; when that reset was already read, it is not read again.
-        st       (cond-> st
-                   (and restart? (not (:reset st))) (assoc :offset 0 :seq 0)
-                   restart?                         (dissoc :reset :detached :stale :behind)
-                   started                          (assoc :started started))
+        st       (cond-> st (and started (nil? (:epoch st))) (assoc :epoch started))
         r        (feed/events-after dir st)
-        st       (cond-> (merge st (select-keys r [:offset :seq]))
-                   (:reset r) (assoc :reset true))
+        new      (or (:new-epoch r)
+                     (when (and started (pos? (feed/epoch-compare started (:epoch st)))) started))
+        tail     (when new (tail-items dir st new))
+        st       (cond-> st
+                   new (-> (assoc :epoch new :seq 0 :offset 0) (dissoc :detached :stale :behind)))
+        r        (if new (feed/events-after dir st) r)
+        st       (merge st (select-keys r [:offset :seq :epoch]))
         old      (some-> publisher-time (age now))
         stale?   (and (true? attached) old (pos? (compare old stale-after)))
         behind?  (and (number? queued) (pos? queued)
@@ -228,9 +248,8 @@
                    (and (nil? status) (not (:missing st)))
                    (conj (str "no feed yet at " dir))
 
-                   restart?
-                   (conj (str "feed restarted at " started ": seq starts again at 1;"
-                              " to follow again, pass --after 0, or the last seq after this line"))
+                   new
+                   (into (concat tail [(str "feed restarted at " new ": seq starts again at 1")]))
 
                    (and stale? (not (:stale st)))
                    (conj (str "publisher heartbeat is " (.getSeconds ^Duration old) " s old"
@@ -248,11 +267,73 @@
                     :queued-at (when (and (number? queued) (pos? queued))
                                  (or (:queued-at st) publisher-time)))
        (or behind? (:behind st)) (assoc :behind (boolean (and (number? queued) (pos? queued)))))
-     (:events r)
-     notices]))
+     (into notices (:events r))]))
+
+;;; The cursor
+
+(defn- cursor-path
+  "Where the cursor of the feed at DIR is kept: --cursor-dir, else
+  DEVOPS_BB_CURSOR_DIR, else ~/.cache/devops-bb/cursor, then the feed's
+  name."
+  [dir opts]
+  (str (fs/path (fs/expand-home (or (:cursor-dir opts) (System/getenv "DEVOPS_BB_CURSOR_DIR")
+                                    "~/.cache/devops-bb/cursor"))
+                (feed/cursor-file (or (:feed (feed/status dir)) (fs/file-name dir))))))
+
+(defn read-cursor
+  "The cursor of the feed at DIR, {:epoch e :seq n}: the last event the
+  agent acked.  Nil when there is none."
+  [dir opts]
+  (let [f (cursor-path dir opts)]
+    (when (fs/exists? f)
+      (let [{:keys [epoch seq]} (try (json/parse-string (slurp f) true) (catch Exception _ nil))]
+        (when (number? seq)
+          {:epoch (when (string? epoch) epoch) :seq (long seq)})))))
+
+(defn- write-cursor!
+  "Make CURSOR the feed at DIR's, by rename; CURSOR."
+  [dir opts cursor]
+  (let [f   (cursor-path dir opts)
+        tmp (str f ".tmp")]
+    (fs/create-dirs (fs/parent f))
+    (spit tmp (json/generate-string (array-map :feed (fs/file-name (fs/strip-ext f))
+                                               :epoch (:epoch cursor)
+                                               :seq (:seq cursor))))
+    (fs/move tmp f {:replace-existing true :atomic-move true})
+    cursor))
+
+(defn- ahead?
+  "Whether the cursor A is past B: a later feed, or a later seq in it."
+  [a b]
+  (or (nil? b)
+      (let [c (feed/epoch-compare (:epoch a) (:epoch b))]
+        (if (and (:epoch a) (:epoch b) (not (zero? c)))
+          (pos? c)
+          (> (:seq a) (:seq b))))))
+
+(defn ack
+  "SEQ [--epoch E]: you handled the feed's events up to SEQ; the cursor
+  moves there, never back.  E names an earlier feed, for its rest"
+  {:org.babashka/cli {:args->opts [:seq] :coerce {:seq :long} :require [:seq]}}
+  [{n :seq :keys [epoch] :as opts}]
+  (let [dir     (or (feed/configured opts)
+                    (fail "ack needs a feed: set DEVOPS_BB_FEED, or pass --feed"))
+        started (:started (feed-status dir))
+        last    (:seq (feed/events-after dir {:epoch started}))]
+    (when (and (nil? epoch) (> n last))
+      (fail (str "seq " n " is past this feed's last, " last
+                 "; for an earlier feed's, pass --epoch")))
+    (let [cursor (read-cursor dir opts)
+          new    {:epoch (or epoch started) :seq n}]
+      (println (json/generate-string
+                (if (ahead? new cursor) (write-cursor! dir opts new) cursor))))))
+
+;;; follow
 
 (defn- json-event [e]
   (json/generate-string (-> e (dissoc :time) (assoc :time (:time-str e)) (dissoc :time-str))))
+
+(defn- notice? [line] (str/starts-with? line "! "))
 
 (defn- print-lines!
   "Print LINES on stdout, and exit 0 if stdout is closed: a write to a
@@ -263,38 +344,65 @@
   (flush)
   (when (.checkError System/out) (System/exit 0)))
 
+(defn- take-events
+  "LINES up to the Nth that is not a notice, and how many are left."
+  [lines n]
+  (loop [[l & more :as ls] lines, out [], n n]
+    (if (or (empty? ls) (<= n 0))
+      [out n]
+      (recur more (conj out l) (if (notice? l) n (dec n))))))
+
 (defn- follow-loop
-  "From ST, every 300 ms, print what (POLL st) says, [st notices lines],
-  notices prefixed `! ', until stdout is closed, the first poll with
-  lines with --once, or --count N lines.  Only lines count: notices
-  print, and the loop waits on."
+  "From ST, every 300 ms, print the lines (POLL st) says, [st lines],
+  until stdout is closed, the first poll with events with --once, or
+  --count N events.  Notices, lines starting `! ', print but do not
+  count, and the loop waits on."
   [poll st {:keys [once] n :count}]
   (loop [st st left n]
-    (let [[st notices lines] (poll st)
-          lines (cond->> lines left (take left))
-          left  (some-> left (- (count lines)))]
-      (print-lines! (map #(str "! " %) notices))
+    (let [[st lines] (poll st)
+          [lines left] (if left (take-events lines left) [lines nil])]
       (print-lines! lines)
-      (when (or (and once (seq lines)) (and left (<= left 0)))
+      (when (or (and once (some (complement notice?) lines)) (and left (<= left 0)))
         (System/exit 0))
       (Thread/sleep 300)
       (recur st left))))
 
-(defn- follow-feed [dir {:keys [after json] :as opts}]
-  (follow-loop (fn [st]
-                 (let [[st events notices] (feed-poll dir st (OffsetDateTime/now))]
-                   [st notices (map #(if json (json-event %) (str (:seq %) " " (summary-line %)))
-                                    events)]))
-               (if after
-                 {:seq after :offset 0}
-                 (select-keys (feed/events-after dir {}) [:offset :seq]))
-               opts))
+(defn- epoch-of
+  "The feed seq N is of, with no cursor to say: this one, unless N is
+  past its last; then the one before, if it is kept."
+  [dir n]
+  (let [started (:started (feed/status dir))]
+    (if (> n (:seq (feed/events-after dir {:epoch started})))
+      (or (:epoch (last (feed/rotated dir))) started)
+      started)))
+
+(defn- follow-feed
+  "Follow the feed at DIR from the cursor, else from its start; with
+  --after N, from N, in the cursor's feed, and the cursor is moved
+  there.  The cursor only moves on --after and `ack': follow keeps
+  where it read in memory, so a restarted follow gives again what was
+  not acked."
+  [dir {:keys [after json] :as opts}]
+  (let [cursor (read-cursor dir opts)
+        from   (if after
+                 (write-cursor! dir opts {:epoch (or (:epoch cursor) (epoch-of dir after))
+                                          :seq after})
+                 (or cursor {:seq 0}))]
+    (follow-loop (fn [st]
+                   (let [[st items] (feed-poll dir st (OffsetDateTime/now))]
+                     [st (map #(cond (string? %) (str "! " %)
+                                     json        (json-event %)
+                                     :else       (str (:seq %) " " (summary-line %)))
+                              items)]))
+                 {:epoch (:epoch from) :seq (:seq from) :offset 0}
+                 opts)))
 
 (defn follow
   "Print a line per new event in the execution log, for files under DIR.
-  In feed mode, every new event of the feed, after --after SEQ if given.
-  It stops when stdout is closed, after the first poll with events
-  (--once), or after N events (--count N)"
+  In feed mode, every event of the feed after the cursor, the last one
+  acked, or after --after SEQ, which moves the cursor.  It stops when
+  stdout is closed, after the first poll with events (--once), or after
+  N events (--count N)"
   {:org.babashka/cli {:coerce {:after :long :count :long :once :boolean}}}
   [{:keys [dir log json] :as opts}]
   (when-let [feed-dir (feed/configured opts)]
@@ -304,7 +412,7 @@
         dir  (str (fs/normalize (fs/absolutize (or dir "."))) "/")]
     (follow-loop (fn [offset]
                    (let [{:keys [events offset]} (log/read-from path offset)]
-                     [offset [] (for [e events
+                     [offset (for [e events
                                       :when (str/starts-with? (str (:file e)) dir)]
                                   (if json (json-event e) (summary-line e)))]))
                  (:offset (log/read-from path 0))

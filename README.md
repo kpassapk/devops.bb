@@ -125,7 +125,8 @@ file, and a file mount stops working.
 ```emacs-lisp
 (setq devops-bb-sandbox-sinks
       '(("wb-box" :via "docker exec -i -u root wb-box" :to "/feed"
-         :map (("/Users/me/work/wb" . "/work")))))
+         :map (("/Users/me/work/wb" . "/work"))
+         :cursors "/home/claude/.cache/devops-bb/cursor")))
 (global-auto-revert-mode 1)   ; pick up the agent's writes
 ```
 
@@ -137,7 +138,10 @@ file, and a file mount stops working.
 
 `:map` rewrites host paths to the sandbox's; `:max-lines` and
 `:max-bytes` change the output cap (500 lines or 64 KB, keeping the
-first and last 250 lines).
+first and last 250 lines). `:cursors` is where the agent keeps its
+cursor (`devops-bb ack`), read through `:via`; the mode line then says
+`agent behind by N`. With a mounted feed and no `:via`, it is a host
+dir, so mount it into the box at the cursor dir too, rw.
 
 Open the workbook, `M-x devops-bb-sandbox-attach`, pick a sink and a
 feed name. The mode line says `sandbox: NAME`. Attach refuses when
@@ -149,6 +153,9 @@ when the dir fails its check (below).
   detached.
 - `sandbox: DEAD` in the mode line: the publisher died. Attach again to
   start a new feed.
+- A new feed keeps the old one's events as `events.<epoch>.jsonl`, and
+  the file of the feed the agent last acked in, so the agent reads what
+  it had not acked before the new feed.
 - One sink serves one workbook at a time; many workbooks can each have
   their own.
 
@@ -184,7 +191,8 @@ and never start `emacsclient`. Feed mode is never turned on by itself.
 | Command | Answers |
 |---|---|
 | `devops-bb status` | the feed, the workbook, `attached`, the publisher's heartbeat, `queued` |
-| `devops-bb follow [--after SEQ] [--json] [--once \| --count N]` | `SEQ event status file:line id` per new event; notices as `! …`, on stdout |
+| `devops-bb follow [--after SEQ] [--json] [--once \| --count N]` | `SEQ event status file:line id` per event after the cursor, or after `--after`, which sets it; notices as `! …`, on stdout |
+| `devops-bb ack SEQ [--epoch E]` | moves the cursor, in `~/.cache/devops-bb/cursor/FEED.json`, to SEQ of this feed, or of the earlier feed E |
 | `devops-bb run-output ID` | that run's output, as on the host, with `truncated` when cut |
 | `devops-bb modified` | whether you have unsaved edits to the workbook |
 
@@ -405,7 +413,7 @@ image already.
 | `devops.bb.view`      | state → screen text; pure                                   |
 | `devops.bb.cli`       | the commands, and feed mode                                 |
 | `devops.bb.dashboard` | the [charm.clj](https://github.com/kpassapk/charm.clj) loop |
-| `devops.bb.feed`      | the feed's layout, its sinks (`put`, `append`), the reader   |
+| `devops.bb.feed`      | the feed's layout, its sinks (`put`, `append`, `rotate`, `fetch`), the reader |
 | `devops.bb.publish`   | stdin → queue → capped outputs and numbered events → sink    |
 
 `bb test` runs the tests. The view tests compare whole screens as text.
