@@ -480,19 +480,33 @@ time (timeout 10 bb -e '(loop [n 0]
 Expected: =0=, then =closed after 1= on stderr, well under a second.
 If =*out*= is not =System/out= in bb, check the writer bb binds.
 
+Result: as expected.  It printed =0=, then =closed after 1= on stderr,
+in 0.125 s in all.  In bb 1.13 =*out*= is an =OutputStreamWriter= over
+=System/out=, so a =flush= of =*out*= reaches the =PrintStream= and
+=checkError= sees the closed pipe at the next write.  There must be a
+next write: with nothing to print, =follow= cannot tell that =head= is
+gone.
+
 *** Done when
 
 - [ ] =follow= exits 0 within one poll once its stdout is closed:
   =follow --after 0 | head -n1= returns after the first event (test,
   with a local-dir feed and a publisher).
-- [ ] =follow --once= prints the first batch of new events (one poll
+  Partly: =follow= exits 0 at its first line after =head= is gone, so
+  the pipeline returns within a poll of the /next/ event, not the
+  first (=follow-wakes-test=).  A closed pipe can only be seen by
+  writing to it, and an idle =follow= writes nothing.  The skill says
+  not to pipe into =head=, and =--once= is the one-shot wake.
+- [X] =follow --once= prints the first batch of new events (one poll
   that has any) and exits 0.  =--count N= exits after N lines.
-- [ ] Notices go to stdout, prefixed =! =, and stderr only for errors.
+- [X] Notices go to stdout, prefixed =! =, and stderr only for errors.
   The restart notice says the =--after= to use.
-- [ ] The skill shows the exact Monitor call, and says not to pipe
+- [X] The skill shows the exact Monitor call, and says not to pipe
   =follow= into =head=.
-- [ ] The dead =~/.claude/skills/devops-bb= symlink is gone from the
-  setup docs.
+- [X] The dead =~/.claude/skills/devops-bb= symlink is gone from the
+  setup docs.  Already: the README lost the =ln -s= in ec6435b, and
+  nothing outside =work/= names it.  The link itself is still on the
+  host, outside the repo.
 
 ** TODO 2. The cursor and the epoch in =follow=, and =ack=
 :PROPERTIES:
