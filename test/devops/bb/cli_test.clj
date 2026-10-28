@@ -104,15 +104,62 @@
         @proc
         (is (= [(str "2 result done /work/a.org:3 " id)
                 "3 modify /work/a.org:all"]
-               (str/split-lines (slurp log))))
-        (testing "and says the feed is detached"
-          (is (str/includes? (slurp errs) "notice: feed detached")))))
+               (remove #(str/starts-with? % "! ") (str/split-lines (slurp log)))))
+        (testing "and says the feed is detached, on stdout"
+          (is (str/starts-with? (first (str/split-lines (slurp log))) "! feed detached"))
+          (is (= "" (slurp errs))))))
+    (testing "--once: the first poll with events, then exit 0"
+      (let [[exit o err] (out "follow" "--after" "1" "--once")]
+        (is (= 0 exit))
+        (is (= ["! feed detached: the workbook's publisher has stopped; no new events until the operator attaches again"
+                (str "2 result done /work/a.org:3 " id)
+                "3 modify /work/a.org:all"]
+               (str/split-lines o)))
+        (is (= "" err))))
+    (testing "--count N: N event lines, then exit 0"
+      (let [[exit o] (out "follow" "--after" "0" "--count" "2")]
+        (is (= 0 exit))
+        (is (= ["1 execute running" "2 result done"]
+               (->> (str/split-lines o)
+                    (remove #(str/starts-with? % "! "))
+                    (map #(str/join " " (take 3 (str/split % #" ")))))))))
     (testing "no emacsclient ran"
       (is (not (fs/exists? (fs/path fake "called")))))))
 
 (defn- put-status! [dir m] (feed/put (feed/local-dir dir) feed/status-file (json/generate-string m)))
 (defn- append! [dir & seqs]
   (doseq [n seqs] (feed/append (feed/local-dir dir) (json/generate-string {:event "save" :seq n}))))
+
+(deftest follow-wakes-test
+  (let [fake (ft/fake-emacsclient!)
+        dir  (apply publish! entries)
+        env  (ft/bb-env fake {"DEVOPS_BB_FEED" dir})
+        fresh! #(put-status! dir (assoc (feed/status dir) :attached true
+                                        :publisher-time (str (OffsetDateTime/now))))
+        save (fn [n] (append! dir n) (fresh!))]
+    (fresh!)
+    (testing "follow | head -n1 ends, follow too, at its first write once head is gone"
+      (let [proc (p/process {:out :string :err :string :env env}
+                            "bash" "-c" (str "set -o pipefail; bb --config " ft/bb-edn
+                                             " follow --after 0 | head -n1"))]
+        (Thread/sleep 2000)
+        (save 4)
+        (let [r (deref proc 3000 nil)]
+          (when-not r (p/destroy-tree proc))
+          (is (some? r) "still running a poll after the next event")
+          (is (= 0 (:exit r)))
+          (is (= (str "1 execute running /work/a.org:3 " id) (str/trim (:out r)))))))
+    (testing "--once, from now: waits for the next poll with an event"
+      (let [proc (p/process {:out :string :err :string :env env}
+                            "bb" "--config" ft/bb-edn "follow" "--once")]
+        (Thread/sleep 1500)
+        (is (p/alive? proc))
+        (save 5)
+        (let [r (deref proc 3000 nil)]
+          (when-not r (p/destroy-tree proc))
+          (is (= 0 (:exit r)))
+          (is (= ["5 save :all"] (str/split-lines (:out r))))
+          (is (= "" (:err r))))))))
 
 (deftest feed-poll-test
   (let [dir  (str (fs/create-temp-dir))
@@ -146,7 +193,9 @@
         (append! dir 1)
         (let [[st evs ns] (poll st 31)]
           (is (= [1] (map :seq evs)))
-          (is (= [(str "feed restarted at " (at 30) ": seq starts again at 1")] ns))
+          (is (= [(str "feed restarted at " (at 30) ": seq starts again at 1;"
+                      " to follow again, pass --after 0, or the last seq after this line")]
+                 ns))
           (testing "detached"
             (put-status! dir {:started (at 30) :publisher-time (at 32) :attached false :queued 0})
             (let [[st _ ns] (poll st 40)]

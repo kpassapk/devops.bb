@@ -229,7 +229,8 @@
                    (conj (str "no feed yet at " dir))
 
                    restart?
-                   (conj (str "feed restarted at " started ": seq starts again at 1"))
+                   (conj (str "feed restarted at " started ": seq starts again at 1;"
+                              " to follow again, pass --after 0, or the last seq after this line"))
 
                    (and stale? (not (:stale st)))
                    (conj (str "publisher heartbeat is " (.getSeconds ^Duration old) " s old"
@@ -253,34 +254,58 @@
 (defn- json-event [e]
   (json/generate-string (-> e (dissoc :time) (assoc :time (:time-str e)) (dissoc :time-str))))
 
-(defn- follow-feed [dir {:keys [after json]}]
-  (loop [st (if after
-              {:seq after :offset 0}
-              (select-keys (feed/events-after dir {}) [:offset :seq]))]
-    (let [[st events notices] (feed-poll dir st (OffsetDateTime/now))]
-      (binding [*out* *err*]
-        (doseq [n notices] (println (str "notice: " n))))
-      (doseq [e events]
-        (println (if json (json-event e) (str (:seq e) " " (summary-line e)))))
-      (flush)
+(defn- print-lines!
+  "Print LINES on stdout, and exit 0 if stdout is closed: a write to a
+  closed pipe only sets System/out's error flag, so `follow | head -n1'
+  would otherwise run on.  *out* writes through System/out."
+  [lines]
+  (doseq [l lines] (println l))
+  (flush)
+  (when (.checkError System/out) (System/exit 0)))
+
+(defn- follow-loop
+  "From ST, every 300 ms, print what (POLL st) says, [st notices lines],
+  notices prefixed `! ', until stdout is closed, the first poll with
+  lines with --once, or --count N lines.  Only lines count: notices
+  print, and the loop waits on."
+  [poll st {:keys [once] n :count}]
+  (loop [st st left n]
+    (let [[st notices lines] (poll st)
+          lines (cond->> lines left (take left))
+          left  (some-> left (- (count lines)))]
+      (print-lines! (map #(str "! " %) notices))
+      (print-lines! lines)
+      (when (or (and once (seq lines)) (and left (<= left 0)))
+        (System/exit 0))
       (Thread/sleep 300)
-      (recur st))))
+      (recur st left))))
+
+(defn- follow-feed [dir {:keys [after json] :as opts}]
+  (follow-loop (fn [st]
+                 (let [[st events notices] (feed-poll dir st (OffsetDateTime/now))]
+                   [st notices (map #(if json (json-event %) (str (:seq %) " " (summary-line %)))
+                                    events)]))
+               (if after
+                 {:seq after :offset 0}
+                 (select-keys (feed/events-after dir {}) [:offset :seq]))
+               opts))
 
 (defn follow
   "Print a line per new event in the execution log, for files under DIR.
-  In feed mode, every new event of the feed, after --after SEQ if given"
-  {:org.babashka/cli {:coerce {:after :long}}}
+  In feed mode, every new event of the feed, after --after SEQ if given.
+  It stops when stdout is closed, after the first poll with events
+  (--once), or after N events (--count N)"
+  {:org.babashka/cli {:coerce {:after :long :count :long :once :boolean}}}
   [{:keys [dir log json] :as opts}]
   (when-let [feed-dir (feed/configured opts)]
     (follow-feed feed-dir opts))
   (let [path (or (some-> log fs/expand-home str) (emacs/log-path)
                  (fail "no log: devops-bb-execution-log is nil or Emacs is out of reach; pass --log"))
         dir  (str (fs/normalize (fs/absolutize (or dir "."))) "/")]
-    (loop [offset (:offset (log/read-from path 0))]
-      (let [{:keys [events offset]} (log/read-from path offset)]
-        (doseq [e events
-                :when (str/starts-with? (str (:file e)) dir)]
-          (println (if json (json-event e) (summary-line e)))
-          (flush))
-        (Thread/sleep 300)
-        (recur offset)))))
+    (follow-loop (fn [offset]
+                   (let [{:keys [events offset]} (log/read-from path offset)]
+                     [offset [] (for [e events
+                                      :when (str/starts-with? (str (:file e)) dir)]
+                                  (if json (json-event e) (summary-line e)))]))
+                 (:offset (log/read-from path 0))
+                 opts)))

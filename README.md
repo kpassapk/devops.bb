@@ -184,7 +184,7 @@ and never start `emacsclient`. Feed mode is never turned on by itself.
 | Command | Answers |
 |---|---|
 | `devops-bb status` | the feed, the workbook, `attached`, the publisher's heartbeat, `queued` |
-| `devops-bb follow [--after SEQ] [--json]` | `SEQ event status file:line id` per new event; notices on stderr |
+| `devops-bb follow [--after SEQ] [--json] [--once \| --count N]` | `SEQ event status file:line id` per new event; notices as `! …`, on stdout |
 | `devops-bb run-output ID` | that run's output, as on the host, with `truncated` when cut |
 | `devops-bb modified` | whether you have unsaved edits to the workbook |
 
@@ -370,7 +370,7 @@ FILE may be relative to the current directory.
 | `devops-bb output FILE LINE [--tag T]` | what a block printed: session, else `#+RESULTS` |
 | `devops-bb run-output ID [--session S]` | what one run printed, from its session |
 | `devops-bb sessions` | the live async sessions |
-| `devops-bb follow [--dir D] [--json]` | a line per new log event under D, until stopped |
+| `devops-bb follow [--dir D] [--json] [--once \| --count N]` | a line per new log event under D, until stopped or stdout is closed |
 | `devops-bb modified FILE` | whether Emacs holds unsaved edits to FILE |
 | `devops-bb revert FILE` | reload FILE's buffer from disk |
 | `devops-bb tools [REGEXP]` | the `tools.org` blocks loaded for `#+call:` |

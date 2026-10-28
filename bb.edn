@@ -20,7 +20,7 @@
               :exec-fn devops.bb.cli/run-output}
   sessions   {:doc "Live async sessions"
               :exec-fn devops.bb.cli/sessions}
-  follow     {:doc "[--dir D] [--json] [--after SEQ]: a line per new log event under D, or feed event"
+  follow     {:doc "[--dir D] [--json] [--after SEQ] [--once | --count N]: a line per new log event under D, or feed event; notices as `! ...'"
               :exec-fn devops.bb.cli/follow}
   modified   {:doc "FILE: does Emacs hold unsaved edits to it (feed mode: FILE optional)"
               :exec-fn devops.bb.cli/modified}
