@@ -192,6 +192,7 @@ and never start `emacsclient`. Feed mode is never turned on by itself.
 |---|---|
 | `devops-bb status` | the feed, the workbook, `attached`, the publisher's heartbeat, `queued` |
 | `devops-bb follow [--after SEQ] [--json] [--once \| --count N]` | `SEQ event status origin file:line id` per event after the cursor, or after `--after`, which sets it; notices as `! …`, on stdout |
+| `devops-bb follow --wake [MS]` | the same, in batches: 750 ms (or MS) after the last event, at most 3 s after the first, only what needs action: results, sync executes, the operator's saves and reverts, notices. `modify`, `execute running`, `auto` saves and `agent` reverts are left out; when the batch's last seq is one of them, `! ack N` ends it. `--raw`, the default, prints every event |
 | `devops-bb ack SEQ [--epoch E]` | moves the cursor, in `~/.cache/devops-bb/cursor/FEED.json`, to SEQ of this feed, or of the earlier feed E |
 | `devops-bb wrote FILE` | after the agent writes FILE: keeps its sha256 in `FEED.wrote` beside the cursor (the last 20), and `follow` marks the `revert` of it `origin` `agent` |
 | `devops-bb run-output ID` | that run's output, as on the host, with `truncated` when cut |

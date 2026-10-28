@@ -683,14 +683,33 @@ events spread over seconds.
 
 *** Done when
 
-- [ ] =--wake= waits 750 ms after the last event, at most 3 s, then
+- [X] =--wake= waits 750 ms after the last event, at most 3 s, then
   prints one line per thing that needs action: a result or sync
   execute, an operator save, detached, restart, stale, dropped.
-- [ ] It hides =modify=, =origin: auto= saves and =origin: agent=
+  =--wake MS= waits MS; =0= does not wait but still leaves out what
+  needs nothing; the cap is 3 s, or MS if longer.  The wait is from
+  the poll that saw the event, so on follow's 300 ms polls it ends up
+  to 300 ms late.  Every notice prints, and every event but those
+  below: an operator =revert= or =kill= too.  Of the operator's saves
+  of one file in a batch only the last prints, so =modify= and =save=
+  are one line.  Feed mode only.  =wake-step= is a pure function of
+  (state, items, now); =wake-step-test= runs a timeline (an async run's
+  four events within 4 ms, a sync run, a modify and save, an agent
+  revert, a drop, a 3.6 s burst) on a fake clock at 0, 750 and 2000 ms.
+- [X] It hides =modify=, =origin: auto= saves and =origin: agent=
   reverts.  =--raw= prints every event, as today.
+  And =execute running=: its =result= follows.  The default stays
+  raw; =--raw= says so, and fails with =--wake=.  The agent acks the
+  highest seq of a batch: when that is a hidden event, the batch ends
+  =! ack N=, its seq.  A batch all hidden prints nothing, and its last
+  event is carried: the next batch's highest seq passes it, or, with
+  no events, that batch ends =! ack N= for it.  A restart drops it,
+  since an ack in the new feed passes the old.
 - [ ] Experiment 2 at =--wake= 0, 750 and 2000 ms: at most one wake-up
   per operator action, nothing that needs action dropped, p50 under
   3 s.
+  Not run: it needs a live Claude.  On the fake-clock timeline, 750 ms
+  gives one batch per run or edit, and the 3.6 s burst two.
 
 ** TODO 6. Split the skill: =devops-link= and =devops-feature=
 :PROPERTIES:

@@ -391,6 +391,77 @@
           %)
        items))
 
+;;; --wake
+
+(def wake-quiet
+  "How long --wake waits after the last event, by default."
+  (Duration/ofMillis 750))
+
+(def wake-cap
+  "How long --wake waits at most after the first event of a burst."
+  (Duration/ofSeconds 3))
+
+(defn- hidden?
+  "Whether event E needs no action: a modify, an async execute (its
+  result comes), or a save or revert Emacs or the agent caused."
+  [e]
+  (or (= :modify (:event e))
+      (and (= :execute (:event e)) (= "running" (:status e)))
+      (contains? #{"auto" "agent"} (:origin e))))
+
+(defn- coalesce
+  "ITEMS with only the last save of each file: an edit saved twice is
+  one thing to act on."
+  [items]
+  (let [save? #(and (map? %) (= :save (:event %)))
+        lst   (into {} (keep-indexed #(when (save? %2) [(:file %2) %1]) items))]
+    (keep-indexed #(when (or (not (save? %2)) (= %1 (lst (:file %2)))) %2) items)))
+
+(defn wake-step
+  "--wake's debounce, over WS, its state, ITEMS, what this poll read,
+  and NOW, in ns: [ws items], ITEMS what to print now.  ITEMS gather
+  until QUIET ns have passed with none, or CAP since the first; then
+  the batch is printed, its hidden events left out.
+
+  The agent acks the highest seq of a batch.  When that is a hidden
+  event, a notice `ack N' ends the batch, N its seq; a batch that is
+  all hidden prints nothing, and its last event is carried: the next
+  batch's highest seq passes it, or, with no events, that batch ends
+  `ack N' for it.  A restart drops what is carried: an ack in the new
+  feed passes the old."
+  [ws items now {:keys [quiet cap]}]
+  (let [ws (if (seq items)
+             (-> ws (update :pending (fnil into []) items)
+                 (assoc :last-at now)
+                 (update :first-at #(or % now)))
+             ws)]
+    (if-not (and (seq (:pending ws))
+                 (or (>= (- now (:last-at ws)) quiet) (>= (- now (:first-at ws)) cap)))
+      [ws []]
+      (let [batch (:pending ws)
+            last  (reduce #(cond (map? %2) %2
+                                 (str/starts-with? %2 "feed restarted") nil
+                                 :else %1)
+                          (:carry ws) batch)
+            shown (coalesce (remove #(and (map? %) (hidden? %)) batch))
+            ack?  (and last (hidden? last) (number? (:seq last)))]
+        (if (empty? shown)
+          [{:carry (when ack? last)} []]
+          [{} (cond-> (vec shown) ack? (conj (str "ack " (:seq last))))])))))
+
+(defn- wake-opts
+  "--wake's QUIET and CAP, in ns, from OPTS; nil without --wake.  WAKE
+  is true, for `wake-quiet', or ms; CAP is `wake-cap', or QUIET if
+  longer."
+  [{:keys [wake raw]}]
+  (when (and wake raw) (fail "--wake and --raw: pass one"))
+  (when wake
+    (let [ms (cond (true? wake) (.toMillis wake-quiet)
+                   (and (int? wake) (>= wake 0)) wake
+                   :else (fail (str "--wake MS: not a number of ms: " wake)))]
+      {:quiet (* ms 1000000)
+       :cap   (* (max ms (.toMillis wake-cap)) 1000000)})))
+
 ;;; follow
 
 (defn- json-event [e]
@@ -444,23 +515,27 @@
   --after N, from N, in the cursor's feed, and the cursor is moved
   there.  The cursor only moves on --after and `ack': follow keeps
   where it read in memory, so a restarted follow gives again what was
-  not acked.  A revert of a file as `wrote' last saw it is the agent's."
+  not acked.  A revert of a file as `wrote' last saw it is the agent's.
+  With --wake, what to act on, in batches (`wake-step')."
   [dir {:keys [after json] :as opts}]
-  (let [cursor (read-cursor dir opts)
+  (let [wake   (wake-opts opts)
+        cursor (read-cursor dir opts)
         from   (if after
                  (write-cursor! dir opts {:epoch (or (:epoch cursor) (epoch-of dir after))
                                           :seq after})
                  (or cursor {:seq 0}))]
-    (follow-loop (fn [st]
-                   (let [[st items] (feed-poll dir st (System/nanoTime))
+    (follow-loop (fn [[st ws]]
+                   (let [now (System/nanoTime)
+                         [st items] (feed-poll dir st now)
                          items (if (some #(= :revert (:event %)) (filter map? items))
                                  (mark-agent items (set (keep :sha256 (wrote-entries dir opts))))
-                                 items)]
-                     [st (map #(cond (string? %) (str "! " %)
-                                     json        (json-event %)
-                                     :else       (str (:seq %) " " (summary-line %)))
-                              items)]))
-                 {:epoch (:epoch from) :seq (:seq from) :offset 0}
+                                 items)
+                         [ws items] (if wake (wake-step ws items now wake) [ws items])]
+                     [[st ws] (map #(cond (string? %) (str "! " %)
+                                          json        (json-event %)
+                                          :else       (str (:seq %) " " (summary-line %)))
+                                   items)]))
+                 [{:epoch (:epoch from) :seq (:seq from) :offset 0} {}]
                  opts)))
 
 (defn follow
@@ -468,18 +543,21 @@
   In feed mode, every event of the feed after the cursor, the last one
   acked, or after --after SEQ, which moves the cursor.  It stops when
   stdout is closed, after the first poll with events (--once), or after
-  N events (--count N)"
-  {:org.babashka/cli {:coerce {:after :long :count :long :once :boolean}}}
+  N events (--count N).  --wake [MS], in feed mode: only what needs
+  action, MS (750) after the last event; --raw, every event, the
+  default"
+  {:org.babashka/cli {:coerce {:after :long :count :long :once :boolean :raw :boolean}}}
   [{:keys [dir log json] :as opts}]
   (when-let [feed-dir (feed/configured opts)]
     (follow-feed feed-dir opts))
+  (when (:wake opts) (fail "--wake needs a feed: set DEVOPS_BB_FEED, or pass --feed"))
   (let [path (or (some-> log fs/expand-home str) (emacs/log-path)
                  (fail "no log: devops-bb-execution-log is nil or Emacs is out of reach; pass --log"))
         dir  (str (fs/normalize (fs/absolutize (or dir "."))) "/")]
     (follow-loop (fn [offset]
                    (let [{:keys [events offset]} (log/read-from path offset)]
                      [offset (for [e events
-                                      :when (str/starts-with? (str (:file e)) dir)]
-                                  (if json (json-event e) (summary-line e)))]))
+                                   :when (str/starts-with? (str (:file e)) dir)]
+                               (if json (json-event e) (summary-line e)))]))
                  (:offset (log/read-from path 0))
                  opts)))

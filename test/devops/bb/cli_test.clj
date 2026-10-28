@@ -132,6 +132,16 @@
                (->> (str/split-lines o)
                     (remove #(str/starts-with? % "! "))
                     (map #(str/join " " (take 3 (str/split % #" ")))))))))
+    (testing "--wake: what to act on, and an ack past the hidden modify"
+      (let [[exit o err] (out "follow" "--after" "0" "--wake" "0" "--once")]
+        (is (= [0 ""] [exit err]))
+        (is (= ["! feed detached: the workbook's publisher has stopped; no new events until the operator attaches again"
+                (str "2 result done /work/a.org:3 " id)
+                "! ack 3"]
+               (str/split-lines o))))
+      (is (= (out "follow" "--after" "0" "--once") (out "follow" "--after" "0" "--once" "--raw")))
+      (is (= 1 (first (out "follow" "--wake" "--raw"))))
+      (is (= 1 (first (out "follow" "--wake" "fast")))))
     (testing "no emacsclient ran"
       (is (not (fs/exists? (fs/path fake "called")))))))
 
@@ -275,6 +285,85 @@
               (testing "a heartbeat that stops is stale 15 s on"
                 (is (= [] (second (poll st 44))))
                 (is (= ["publisher heartbeat has not changed for 16 s"] (second (poll st 46))))))))))))
+
+;;; --wake
+
+(defn- wake-run
+  "TIMELINE, [ms item] pairs, through wake-step with OPTS, polled every
+  300 ms as follow does, to 20 s, on a fake clock: [ms lines] for each
+  poll that printed."
+  [opts timeline]
+  (loop [t 0 ws {} tl timeline out []]
+    (if (> t 20000)
+      out
+      (let [[seen later] (split-with #(<= (first %) t) tl)
+            [ws items] (cli/wake-step ws (map second seen) (* t 1000000) opts)
+            show #(if (string? %)
+                    (str "! " %)
+                    (str/join " " (remove nil? [(:seq %) (name (:event %)) (:status %) (:origin %)])))]
+        (recur (+ t 300) ws later (cond-> out (seq items) (conj [t (mapv show items)])))))))
+
+(def timeline
+  (let [ev (fn [ms n event & {:as m}] [ms (merge {:seq n :event event :file "/work/wb.org"} m)])]
+    [;; An async run: four events within 4 ms.
+     (ev 0 1 :save :origin "auto")
+     (ev 1 2 :execute :status "running" :origin "operator" :id id)
+     (ev 2 3 :save :origin "auto")
+     (ev 4 4 :result :status "done" :origin "operator" :id id)
+     ;; A sync run.
+     (ev 2000 5 :save :origin "auto")
+     (ev 2001 6 :execute :status "done" :origin "operator" :id ft/id2)
+     ;; The operator edits and saves.
+     (ev 4000 7 :modify :origin "operator")
+     (ev 4500 8 :save :origin "operator")
+     ;; Emacs reloads the agent's write.
+     (ev 6000 9 :revert :origin "agent")
+     ;; The host dropped three; the next is a modify.
+     [8000 "3 events dropped (seq 10-12)"]
+     (ev 8001 13 :modify :origin "operator")
+     ;; A long burst, an event every 600 ms.
+     (ev 10000 14 :execute :status "running" :origin "operator")
+     (ev 10600 15 :save :origin "auto")
+     (ev 11200 16 :result :status "done" :origin "operator")
+     (ev 11800 17 :result :status "error" :origin "operator")
+     (ev 12400 18 :save :origin "auto")
+     (ev 13000 19 :save :origin "auto")
+     (ev 13600 20 :result :status "done" :origin "operator")]))
+
+(deftest wake-step-test
+  (testing "750 ms after the last event seen, at most 3 s after the first"
+    (is (= [[1200 ["4 result done operator"]]
+            [3000 ["6 execute done operator"]]
+            ;; The modify and the save: one line.
+            [5400 ["8 save operator"]]
+            ;; The agent's revert alone printed nothing; ack 13 passes it.
+            [9000 ["! 3 events dropped (seq 10-12)" "! ack 13"]]
+            ;; Seen first at 10200: the cap, 3 s on, ends the batch.
+            [13200 ["16 result done operator" "17 result error operator" "! ack 19"]]
+            [14700 ["20 result done operator"]]]
+           (wake-run (#'cli/wake-opts {:wake true}) timeline))))
+  (testing "--wake 0: each poll's at once, still only what to act on"
+    (is (= [[300 ["4 result done operator"]]
+            [2100 ["6 execute done operator"]]
+            [4500 ["8 save operator"]]
+            [8100 ["! 3 events dropped (seq 10-12)" "! ack 13"]]
+            [11400 ["16 result done operator"]]
+            [12000 ["17 result error operator"]]
+            [13800 ["20 result done operator"]]]
+           (wake-run (#'cli/wake-opts {:wake 0}) timeline))))
+  (testing "--wake 2000: 2 s after the last, at most 3 s"
+    (is (= [[3000 ["4 result done operator" "6 execute done operator"]]
+            [7200 ["8 save operator" "! ack 9"]]
+            [11100 ["! 3 events dropped (seq 10-12)" "! ack 15"]]
+            [14400 ["16 result done operator" "17 result error operator" "20 result done operator"]]]
+           (wake-run (#'cli/wake-opts {:wake 2000}) timeline))))
+  (testing "a restart drops the carried ack: it would be the old feed's seq"
+    (let [opts (#'cli/wake-opts {:wake 0})
+          [ws] (cli/wake-step {} [{:seq 9 :event :revert :origin "agent"}] 0 opts)]
+      (is (= {:seq 9 :event :revert :origin "agent"} (:carry ws)))
+      (is (= ["feed restarted at T: seq starts again at 1"]
+             (second (cli/wake-step ws ["feed restarted at T: seq starts again at 1"] 1 opts))))
+      (is (= ["feed detached" "ack 9"] (second (cli/wake-step ws ["feed detached"] 1 opts)))))))
 
 ;;; The cursor
 

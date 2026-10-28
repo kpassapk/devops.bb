@@ -20,7 +20,7 @@
               :exec-fn devops.bb.cli/run-output}
   sessions   {:doc "Live async sessions"
               :exec-fn devops.bb.cli/sessions}
-  follow     {:doc "[--dir D] [--json] [--after SEQ] [--once | --count N]: a line per new log event under D, or feed event after the cursor; notices as `! ...'"
+  follow     {:doc "[--dir D] [--json] [--after SEQ] [--wake [MS] | --raw] [--once | --count N]: a line per new log event under D, or feed event after the cursor; notices as `! ...'; --wake: only what needs action, MS (750) after a burst"
               :exec-fn devops.bb.cli/follow}
   ack        {:doc "SEQ [--epoch E]: feed mode: events up to SEQ are handled; moves the cursor follow resumes from"
               :exec-fn devops.bb.cli/ack}

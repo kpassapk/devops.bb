@@ -44,9 +44,9 @@ and why.
 1. `devops-bb status`: the feed's name, the workbook, and whether the
    operator is attached (`attached`). If `attached` is false, tell the
    operator and wait.
-2. Start `devops-bb follow` under the Monitor tool (see "Following
-   runs"). It resumes from your cursor, the last event you acked, so
-   nothing is lost when it is started again.
+2. Start `devops-bb follow --wake` under the Monitor tool (see
+   "Following runs"). It resumes from your cursor, the last event you
+   acked, so nothing is lost when it is started again.
 3. Check `devops-bb modified`, then write blocks into the workbook
    (see "Editing the workbook"), and run `devops-bb wrote
    /work/wb.org` right after each write.
@@ -54,15 +54,16 @@ and why.
    see it in `follow`.
 5. Read each run with `devops-bb run-output ID`, tell the operator what
    it shows, and write the next block, or do the next step yourself.
-6. `devops-bb ack SEQ` once you have handled an event, the `seq` of its
-   line. Until then a restarted `follow` gives it to you again.
+6. `devops-bb ack SEQ` once you have handled a batch: the highest seq
+   in it, the last event line's `seq`, or N of a closing `! ack N`. Until
+   then a restarted `follow` gives it to you again.
 
 ## Commands
 
 | Command | Answers |
 |---|---|
 | `devops-bb status` | `feed`, `workbook`, `devops-mode`, `attached`, `started`, `publisher-time`, `queued`, `dropped` |
-| `devops-bb follow [--json] [--once \| --count N]` | a line per event after your cursor, and notices; runs until stopped |
+| `devops-bb follow --wake [MS] [--json] [--once \| --count N]` | a line per thing to act on after your cursor, in batches, and notices; runs until stopped. `--raw` (the default): every event |
 | `devops-bb ack SEQ [--epoch E]` | moves your cursor to `SEQ`: events up to it are handled |
 | `devops-bb wrote FILE` | records FILE's hash as you just wrote it, so its `revert` comes back as yours |
 | `devops-bb run-output ID` | one run's output, by the ID `follow` printed |
@@ -74,45 +75,60 @@ operator instead.
 
 ## Following runs
 
+`devops-bb follow --wake` waits until a burst of events has been quiet
+for 750 ms (3 s at most from its first), then prints one line per thing
+to act on, so one run wakes you once:
+
 ```
-1 save auto /work/wb.org:all
-2 execute running operator /work/wb.org:7 0b9e1b1a-1111-4222-8333-444455556666
-3 save auto /work/wb.org:all
 4 result done operator /work/wb.org:7 0b9e1b1a-1111-4222-8333-444455556666
-5 revert agent /work/wb.org:all
-6 modify operator /work/wb.org:all
+6 execute done operator /work/wb.org:12 0b9e1b1a-1111-4222-8333-777788889999
+8 save operator /work/wb.org:all
+! 3 events dropped (seq 10-12)
+! ack 13
 ```
 
 That is: `seq`, event, how it went, who caused it (`origin`),
 `file:line`, and the run's ID.
 
-- An async block (a shell block on a `#+TARGET`) logs `execute running`,
-  then `result done`. Read it on `result`.
-- A sync block (`emacs-lisp`, `:results value`, a `:file` block) logs
-  only `execute`, with an ID and `sync` true in `--json`. Its output is
-  its `#+RESULTS:`, as org formatted it; stderr is lost unless the block
-  captures it.
-- `modify`, `save`, `revert`, `kill`: edits to the workbook. Only
-  `origin` `operator` is the operator's doing. `auto` is the save
-  Emacs makes as each result lands, and `agent` is Emacs reloading a
-  file you wrote (its sha256 matches one `devops-bb wrote` kept).
-  Neither needs any action: ack them and go on. A `revert` with
+- `result`: an async block (a shell block on a `#+TARGET`) is done.
+  Read it with `run-output ID`.
+- `execute done` (or `error`): a sync block (`emacs-lisp`, `:results
+  value`, a `:file` block) ran, with an ID and `sync` true in `--json`.
+  Its output is its `#+RESULTS:`, as org formatted it; stderr is lost
+  unless the block captures it.
+- `save`, `revert`, `kill` with `operator`: the operator changed the
+  workbook. Read it again before you write. A `revert` with
   `operator` is a write you did not record, or someone else's.
-- `follow` runs until stopped, and starts from your cursor: the last
-  event you acked with `devops-bb ack SEQ`, kept in
-  `~/.cache/devops-bb/cursor/`, so it survives `/compact` and a
-  restart. Ack each event once handled, after its run is read and
-  answered; an event you see again after a restart is one you had not
-  acked, so handle it as the same event (same `seq`, same run ID), not
-  a new one. `--after SEQ` sets the cursor by hand; `--after 0`
-  replays the feed.
+- Lines starting `! ` are notices (below).
 
-Run it under the Monitor tool, which wakes you on each line:
+`--wake` leaves out what needs no action: `modify` (the save that
+follows says it), `execute running` (its `result` follows), saves with
+`origin` `auto` (Emacs saves as each result lands) and reverts with
+`agent` (Emacs reloading a file you wrote, its sha256 one `devops-bb
+wrote` kept). A batch that is all of these prints nothing.
+
+**Ack the highest seq of a batch**, once you have handled it: the last
+event line's `seq`, or, when the batch ends `! ack N`, N. `! ack N`
+means the events up to N that were left out need nothing; it comes
+when the last event of the batch is one of them, and covers any
+batch before it that printed nothing. Ack after the run is read and
+answered.
+
+`follow` starts from your cursor, the last seq you acked with
+`devops-bb ack SEQ`, kept in `~/.cache/devops-bb/cursor/`, so it
+survives `/compact` and a restart. A line you see again after a
+restart is one you had not acked: handle it as the same event (same
+`seq`, same run ID), not a new one. `--after SEQ` sets the cursor by
+hand; `--after 0` replays the feed. `--wake MS` waits MS instead of
+750 ms; `--wake 0` does not wait. Without `--wake`, or with `--raw`,
+`follow` prints every event, `modify` and `auto` saves included.
+
+Run it under the Monitor tool, which wakes you on each batch:
 
 ```
 Monitor({
-  command: "devops-bb follow",
-  description: "workbook runs (devops-bb follow)",
+  command: "devops-bb follow --wake",
+  description: "workbook runs (devops-bb follow --wake)",
   timeout_ms: 1800000
 })
 ```
@@ -123,14 +139,15 @@ start it again, the same way.
 Don't pipe `follow` into `head` (`follow | head -n1`): `head` cannot
 pass a line on before it exits, and `follow` only notices the pipe is
 gone at its next line, so you are woken late or not at all. For a
-one-shot wake, run `devops-bb follow --once` as a background shell: it
-prints the first batch of events after your cursor and exits.
+one-shot wake, run `devops-bb follow --wake --once` as a background
+shell: it prints the first batch after your cursor and exits.
 `--count N` exits after N events.
 
 `follow` prints notices on stdout, as lines starting `! `:
 
 | Notice | Means |
 |---|---|
+| `! ack N` | `--wake` only: the batch ends in events left out; once you have handled the batch, `devops-bb ack N` |
 | `! no feed yet at DIR` | the feed has not been published; wait, or tell the operator |
 | `! publisher heartbeat has not changed for N s` | the operator's publisher is not refreshing; Emacs may be busy or gone |
 | `! publisher is N events behind` | runs are queued on the host; wait |
