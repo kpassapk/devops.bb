@@ -580,7 +580,7 @@ epoch the agent's cursor is in; the rest are removed, so at most two.
   passes: no events missed across a =/compact= and a re-attach.
   Not run: it needs a podman box and a live Claude.
 
-** TODO 3. Publisher: a seq gap for drops, staleness on one clock
+** DONE 3. Publisher: a seq gap for drops, staleness on one clock
 :PROPERTIES:
 :BRANCH:   link-03-publisher
 :BASE:     link-02-cursor
@@ -602,14 +602,16 @@ Failure modes #7 and #8, both local to =publish.clj= and =feed-poll=.
   60 s behind there is no false or hidden stale notice (test with a
   skewed =now=, =stale-on-one-clock-test=).  The notice is now
   =! publisher heartbeat has not changed for N s=.
-- [ ] =Via= sends every queued event in one exec: a burst of 10 has
+- [X] =Via= sends every queued event in one exec: a burst of 10 has
   p95 under 1 s (experiment 5, re-run).
-  Partly: every queued event, with its output, goes in one =sh -c=
+  Done: every queued event, with its output, goes in one =sh -c=
   (at most 100, about 1 MB; outputs are one line of JSON, so each is
   taken with =read=).  A burst of 10 queued is one exec
   (=via-push-test=).  Through =--via env=, a whole publish of 100
-  events took 0.09 s, against 0.65 s before.  Not re-run through
-  podman: no box here.
+  events took 0.09 s, against 0.65 s before.  Through =podman exec
+  -i -u root lr-box=, a whole publish run (bb start, feed start and
+  every event) took 0.51 s for 1 event, 0.47 s for 10 and 0.52 s for
+  100, against 10.8 s for the last of 100 before.
 
 ** TODO 4. Who caused an event: =origin= and the file hash
 :PROPERTIES:
