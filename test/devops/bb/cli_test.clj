@@ -176,8 +176,10 @@
   (let [dir  (str (fs/create-temp-dir))
         now  (OffsetDateTime/parse "2026-10-19T10:00:00-06:00")
         at   (fn [s] (str (.plusSeconds now s)))
+        ;; feed-poll's clock is this machine's monotonic one, in ns.
+        ns-at (fn [secs] (* secs 1000000000))
         poll-in (fn [dir st secs]
-                  (let [[st items] (cli/feed-poll dir st (.plusSeconds now secs))]
+                  (let [[st items] (cli/feed-poll dir st (ns-at secs))]
                     [st (filterv map? items) (filterv string? items)]))
         poll (partial poll-in dir)]
     (feed/put (feed/local-dir dir) feed/events-file "")
@@ -188,9 +190,9 @@
         (is (= [1 2] (map :seq evs)))
         (is (= [] ns))
         (is (= (at 0) (:epoch st))))
-      (testing "a stale heartbeat is said once"
+      (testing "a heartbeat that has not changed is stale, said once"
         (let [[st _ ns] (poll st 20)]
-          (is (= ["publisher heartbeat is 20 s old"] ns))
+          (is (= ["publisher heartbeat has not changed for 19 s"] ns))
           (is (= [] (nth (poll st 25) 2)))))
       (testing "publisher is N events behind, once queued stays up"
         (put-status! dir {:started (at 0) :publisher-time (at 3) :attached true :queued 4})
@@ -206,7 +208,7 @@
         (feed/rotate (feed/local-dir dir) (at 0) [])
         (put-status! dir {:started (at 30) :publisher-time (at 30) :attached true :queued 0})
         (append! dir 1)
-        (let [[st items] (cli/feed-poll dir st (.plusSeconds now 31))]
+        (let [[st items] (cli/feed-poll dir st (ns-at 31))]
           (is (= [(str "the rest of feed " (at 0) ", which has ended: seq 3-3; ack these with --epoch " (at 0))
                   3
                   (str "feed restarted at " (at 30) ": seq starts again at 1")
@@ -248,6 +250,28 @@
             (let [[_ evs ns] (poll st 3)]
               (is (= [2] (map :seq evs)))
               (is (= [] ns)))))))))
+
+(deftest stale-on-one-clock-test
+  (testing "the box clock 20 s ahead or 60 s behind the host's: no false or hidden stale notice"
+    (doseq [skew [-20 60]]
+      (let [dir   (str (fs/create-temp-dir))
+            ;; The host's time, as the publisher writes it, SKEW s off
+            ;; this machine's; feed-poll never reads this machine's.
+            t0    (OffsetDateTime/now)
+            host  (fn [s] (str (.plusSeconds t0 (+ skew s))))
+            beat! (fn [s] (put-status! dir {:started (host 0) :publisher-time (host s)
+                                            :attached true :queued 0}))
+            poll  (fn [st secs] (let [[st items] (cli/feed-poll dir st (* secs 1000000000))]
+                                  [st (filterv string? items)]))]
+        (testing (str "skew " skew " s")
+          (beat! 0)
+          (let [[st ns] (poll {} 0)]
+            (is (= [] ns) "a fresh heartbeat is fresh")
+            (let [st (reduce (fn [st t] (beat! t) (let [[st ns] (poll st t)] (is (= [] ns)) st))
+                             st (range 3 31 3))]
+              (testing "a heartbeat that stops is stale 15 s on"
+                (is (= [] (second (poll st 44))))
+                (is (= ["publisher heartbeat has not changed for 16 s"] (second (poll st 46))))))))))))
 
 ;;; The cursor
 

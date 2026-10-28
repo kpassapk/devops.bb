@@ -590,15 +590,26 @@ Failure modes #7 and #8, both local to =publish.clj= and =feed-poll=.
 
 *** Done when
 
-- [ ] A dropped event still takes a seq, so the feed shows a gap, and
+- [X] A dropped event still takes a seq, so the feed shows a gap, and
   =follow= prints =! N events dropped (seq A-B)=.  The
-  =:max-queued 5= repro is a test.
-- [ ] Staleness is judged by whether =publisher-time= changed, timed
+  =:max-queued 5= repro is a test (=queue-full-test=: seqs 1-5, then
+  21).  The gap is said by a =dropped= event ={from, to}= with the next
+  seq, queued before the next event or at EOF, so =follow= never
+  guesses from a jump; the agent acks past it as usual.  "agent behind
+  by N" counts events, not the dropped seqs.
+- [X] Staleness is judged by whether =publisher-time= changed, timed
   on the sandbox's monotonic clock.  With the box clock 20 s ahead or
   60 s behind there is no false or hidden stale notice (test with a
-  skewed =now=).
+  skewed =now=, =stale-on-one-clock-test=).  The notice is now
+  =! publisher heartbeat has not changed for N s=.
 - [ ] =Via= sends every queued event in one exec: a burst of 10 has
   p95 under 1 s (experiment 5, re-run).
+  Partly: every queued event, with its output, goes in one =sh -c=
+  (at most 100, about 1 MB; outputs are one line of JSON, so each is
+  taken with =read=).  A burst of 10 queued is one exec
+  (=via-push-test=).  Through =--via env=, a whole publish of 100
+  events took 0.09 s, against 0.65 s before.  Not re-run through
+  podman: no box here.
 
 ** TODO 4. Who caused an event: =origin= and the file hash
 :PROPERTIES:

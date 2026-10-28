@@ -5,6 +5,7 @@
    [cheshire.core :as json]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
+   [devops.bb.cli :as cli]
    [devops.bb.feed :as feed]
    [devops.bb.publish :as publish]))
 
@@ -205,16 +206,54 @@
     (is (= n (count (filter #(= :append (first %)) @ops))))))
 
 (deftest queue-full-test
-  (let [release (promise)
-        sink    (recording-sink (atom []) (fn [op _] (when (= :append op) @release)))
-        {:keys [state]} (binding [*err* (java.io.StringWriter.)]
-                          (publish/start! {:sink sink :to "/feed" :max-queued 5 :heartbeat-ms 60000}
-                                          (apply lines-in (repeat 20 {:event "save"}))))]
-    (Thread/sleep 300)
-    (is (:eof @state))
-    (is (= 5 (:enqueued @state)))
-    (is (= 15 (:dropped @state)))
-    (deliver release true)))
+  (testing "the repro: :max-queued 5, a sink taking 50 ms per append, 20 events"
+    (let [dir  (temp-dir)
+          d    (feed/local-dir dir)
+          sink (reify feed/Sink
+                 (put [_ path s] (feed/put d path s))
+                 (append [_ line] (Thread/sleep 50) (feed/append d line))
+                 (rotate [_ epoch keep] (feed/rotate d epoch keep))
+                 (fetch [_ path] (feed/fetch d path)))
+          {:keys [state done]} (binding [*err* (java.io.StringWriter.)]
+                                 (publish/start! {:sink sink :to dir :max-queued 5 :heartbeat-ms 60000}
+                                                 (apply lines-in (repeat 20 {:event "save"}))))]
+      (is (deref done 5000 false))
+      (is (= 15 (:dropped @state)))
+      (is (= 15 (:dropped (feed/status dir))))
+      (testing "the dropped events take seqs 6-20; a `dropped' event, seq 21, says so"
+        (let [evs (:events (feed/events-after dir {}))]
+          (is (= [1 2 3 4 5 21] (map :seq evs)))
+          (is (= {:event :dropped :from 6 :to 20} (select-keys (last evs) [:event :from :to])))))
+      (testing "follow prints it as a notice"
+        (let [[_ items] (cli/feed-poll dir {} 0)]
+          (is (= [1 2 3 4 5 "15 events dropped (seq 6-20)"]
+                 (map #(if (map? %) (:seq %) %) (remove #(and (string? %) (str/starts-with? % "feed detached")) items))))))
+      (testing "and the agent is behind by the events, not the seqs"
+        (let [{:keys [started pushed-seq gaps]} @state]
+          (is (= 6 (publish/behind started pushed-seq gaps nil)))
+          (is (= 1 (publish/behind started pushed-seq gaps {:epoch started :seq 5})))
+          (is (= 1 (publish/behind started pushed-seq gaps {:epoch started :seq 9})))
+          (is (= 0 (publish/behind started pushed-seq gaps {:epoch started :seq 21})))))))
+  (testing "a drop shows with the next event, before it"
+    (let [release (promise)
+          ops     (atom [])
+          sink    (recording-sink ops (fn [op _] (when (= :append op) @release)))
+          out     (java.io.PipedOutputStream.)
+          in      (java.io.InputStreamReader. (java.io.PipedInputStream. out) "UTF-8")
+          {:keys [state done]} (binding [*err* (java.io.StringWriter.)]
+                                 (publish/start! {:sink sink :to "/feed" :max-queued 2 :heartbeat-ms 60000} in))
+          send!   #(do (.write out (.getBytes (str (json/generate-string %) "\n") "UTF-8")) (.flush out))]
+      (dotimes [_ 4] (send! {:event "save"}))
+      (loop [n 0] (when (and (< (:dropped @state) 2) (< n 100)) (Thread/sleep 20) (recur (inc n))))
+      (deliver release true)
+      (loop [n 0] (when (and (< (:pushed @state) 2) (< n 100)) (Thread/sleep 20) (recur (inc n))))
+      (send! {:event "modify"})
+      (.close out)
+      (is (deref done 5000 false))
+      (is (= [[1 "save"] [2 "save"] [5 "dropped"] [6 "modify"]]
+             (keep (fn [[op x]] (when (= :append op)
+                                  ((juxt :seq :event) (json/parse-string x true))))
+                   @ops))))))
 
 (deftest publish-from-stdin-test
   (let [fake (fake-emacsclient!)
@@ -365,10 +404,15 @@
         (is (= #{"events.jsonl" (feed/rotated-file c)} (event-files dir)))))))
 
 (deftest behind-test
-  (is (= 2 (publish/behind "a" 3 {:epoch "a" :seq 1})))
-  (is (= 0 (publish/behind "a" 3 {:epoch "a" :seq 5})))
-  (is (= 3 (publish/behind "a" 3 {:epoch "z" :seq 9})))
-  (is (= 3 (publish/behind "a" 3 nil)))
+  (is (= 2 (publish/behind "a" 3 [] {:epoch "a" :seq 1})))
+  (is (= 0 (publish/behind "a" 3 [] {:epoch "a" :seq 5})))
+  (is (= 3 (publish/behind "a" 3 [] {:epoch "z" :seq 9})))
+  (is (= 3 (publish/behind "a" 3 [] nil)))
+  (testing "dropped seqs are not events"
+    (is (= 4 (publish/behind "a" 10 [[3 4] [7 8]] {:epoch "a" :seq 2})))
+    (is (= 4 (publish/behind "a" 10 [[3 4] [7 8]] {:epoch "a" :seq 4})))
+    (is (= 2 (publish/behind "a" 10 [[3 4] [7 8]] {:epoch "a" :seq 7})))
+    (is (= 6 (publish/behind "a" 10 [[3 4] [7 8]] nil))))
   (testing "the heartbeat prints it on stdout when it changes"
     (let [dir     (str (fs/path (temp-dir) "feed"))
           cur     (temp-dir)
@@ -420,8 +464,8 @@
     (feed/put s feed/events-file "")
     (feed/put s feed/status-file "{\"feed\":\"wb\"}")
     (feed/append s "{\"seq\":1}")
-    (feed/put-append s (feed/output-file id1) "{\"output\":\"a\\nb\"}"
-                     "{\"seq\":2,\"input\":\"x  'y' \\\"$z\\\" \\\\n\"}")
+    (feed/push s [{:path (feed/output-file id1) :output "{\"output\":\"a\\nb\"}"
+                   :event "{\"seq\":2,\"input\":\"x  'y' \\\"$z\\\" \\\\n\"}"}])
     (is (= 4 (calls via)) "one command each, a result too")
     (is (= {:feed "wb"} (feed/status to)))
     (is (= [1 2] (map :seq (:events (feed/events-after to {})))))
@@ -439,7 +483,7 @@
                         to {:timeout-ms 5000})]
         (feed/put s feed/events-file "")
         (feed/put s feed/status-file "{\"feed\":\"no-eof\"}")
-        (feed/put-append s (feed/output-file id2) "{\"output\":\"é\"}" "{\"seq\":1}")
+        (feed/push s [{:path (feed/output-file id2) :output "{\"output\":\"é\"}" :event "{\"seq\":1}"}])
         (feed/append s "{\"seq\":2}")
         (is (= {:feed "no-eof"} (feed/status to)))
         (is (= "{\"output\":\"é\"}" (feed/output to id2)))
@@ -460,7 +504,7 @@
       (fs/create-dirs (fs/path root "a"))
       (fs/create-sym-link (fs/path root "a" "outputs") elsewhere)
       (is (thrown-with-msg? Exception #"symlink"
-                            (feed/put-append (sink "a") (feed/output-file id1) "{}" "{\"seq\":1}")))
+                            (feed/push (sink "a") [{:path (feed/output-file id1) :output "{}" :event "{\"seq\":1}"}])))
       (is (not (fs/exists? (fs/path root "a" "events.jsonl"))) "no event without its output"))
     (testing "the target a symlink"
       (fs/create-dirs (fs/path root "b"))
@@ -500,10 +544,61 @@
                       "--to" to "--map" "/h/w=/work" "--name" "wb")
         evs  (:events (feed/events-after to {}))]
     (is (zero? (:exit r)) (:err r))
-    (testing "one command per result: the old status, start, status, execute, two results, status"
-      (is (= 7 (calls via))))
+    (testing "the old status, start, status, the events, in one push if they were all queued by then, status"
+      (is (<= 5 (calls via) 7)))
     (is (= [1 2 3] (map :seq evs)))
     (is (every? #(= "/work/a.org" (:file %)) evs))
     (is (= "y\n" (:output (json/parse-string (feed/output to id2) true))))
     (is (false? (:attached (feed/status to))))
     (is (not (fs/exists? (fs/path fake "called"))))))
+
+(deftest via-push-test
+  (let [via   (fake-via! 0)
+        to    (str (fs/path (temp-dir) "feed"))
+        v     (feed/via (str (fs/path via "via")) to)
+        ;; A --via sink whose feed starts only once GATE is delivered.
+        gated (fn [gate]
+                (reify
+                  feed/Sink
+                  (put [_ path s] (feed/put v path s))
+                  (append [_ line] (feed/append v line))
+                  (rotate [_ epoch keep] (feed/rotate v epoch keep))
+                  (fetch [_ path] @gate (feed/fetch v path))
+                  feed/Batched
+                  (push [_ items] (feed/push v items))))
+        id9   "0b9e1b1a-1111-4222-8333-000000000009"
+        burst (for [i (range 10)]
+                (if (even? i)
+                  {:event "save" :file "/w/a.org"}
+                  {:event "result" :id (format "0b9e1b1a-1111-4222-8333-%012d" i) :file "/w/a.org"
+                   :output {:status "done" :output (str "out " i "\n'$x'")}}))
+        ;; Publish the burst, every event queued before the feed starts:
+        ;; the commands it took to push them.
+        pub!  (fn [opts]
+                (fs/delete-if-exists (fs/path via "calls"))
+                (let [gate (promise)
+                      {:keys [state done]} (publish/start! (merge {:sink (gated gate) :to to :heartbeat-ms 60000} opts)
+                                                           (apply lines-in burst))]
+                  (loop [n 0] (when (and (not (:eof @state)) (< n 100)) (Thread/sleep 20) (recur (inc n))))
+                  (deliver gate true)
+                  (is (deref done 10000 false))
+                  ;; Less the fetch, rotate and two puts of status.json.
+                  (- (calls via) 4)))]
+    (testing "a burst of 10 goes in one command, in order, each output in place"
+      (is (= 1 (pub! {})))
+      (let [evs (:events (feed/events-after to {}))]
+        (is (= (range 1 11) (map :seq evs)))
+        (is (= 5 (count (keep #(some->> (:id %) (feed/output to)) evs))))
+        (is (= "out 9\n'$x'" (:output (json/parse-string (feed/output to id9) true))))))
+    (testing "at most :batch-max events a command"
+      (is (= 4 (pub! {:batch-max 3}))))
+    (testing "and about :batch-bytes, never none"
+      (is (= 10 (pub! {:batch-bytes 10}))))
+    (testing "a batch pushed twice, as a retry may: a reader skips the repeats by seq"
+      (let [items [{:path (feed/output-file id1) :output "{\"output\":1}" :event "{\"seq\":11}"}
+                   {:event "{\"seq\":12}"}]]
+        (feed/push v items)
+        (feed/push v items)
+        (is (= [11 12] (map :seq (:events (feed/events-after to {:seq 10})))))))
+    (testing "an output of more than one line is refused, never split"
+      (is (thrown? Exception (feed/push v [{:path (feed/output-file id1) :output "a\nb" :event "{}"}]))))))

@@ -18,8 +18,8 @@
   file where the feed is.  The
   publisher (devops.bb.publish) writes through a sink only, so a sink
   that runs a command elsewhere (--via, --ssh) is one more `Sink'.  Such
-  a sink is also a `Batched' one: a result's output and event go in one
-  command, so a run costs one round trip.
+  a sink is also a `Batched' one: every queued event, with its output,
+  goes in one command, so a burst costs one round trip.
 
   The reader -- `status', `events-after', `output' -- is everything the
   sandbox side reads, and the one place a NATS reader would replace."
@@ -133,9 +133,10 @@
   (->LocalDir (str (fs/absolutize (fs/expand-home dir)))))
 
 (defprotocol Batched
-  (put-append [sink path s line]
-    "`put' PATH, then `append' LINE, in one go: never the line without
-  the file."))
+  (push [sink items]
+    "For each of ITEMS, [{:path p :output s :event line}], in order:
+  `put' its :output at :path, when it has one, then `append' its
+  :event, in one go: never an event without its file."))
 
 ;;; --via CMD: a command that runs `sh' where the feed is
 
@@ -156,7 +157,8 @@
 ;; The scripts never wait for EOF on stdin: `docker exec -i' can lose
 ;; an EOF that comes before the command starts, and the command would
 ;; hang.  A line is taken with `read', which stops at its newline, and
-;; a file, always last, by its length, with `head -c'.
+;; a file, always last, by its length, with `head -c', which may read
+;; past it.  A batch's outputs, each one line of JSON, are lines.
 
 (defn- put-sh
   "sh that takes the next N bytes of stdin, the rest of it, to TO/PATH
@@ -181,6 +183,24 @@
          (refuse-links (sh-quote to) "\"$f\"")
          "mkdir -p " (sh-quote to) "; "
          "printf '%s\\n' \"$ev\" >> \"$f\"")))
+
+(defn- push-sh
+  "sh that, for each of ITEMS in turn, takes its output line from stdin,
+  when it has one, to TO/its :path by rename, then appends its event
+  line, refusing symlinks.  Each line is taken with `read': an output is
+  one line of JSON, so nothing is read past it."
+  [to items]
+  (str "set -e; set -C; d=" (sh-quote to) "; "
+       "put() { f=\"$d/$1\"; "
+       (refuse-links "\"$d\"" "\"$d/outputs\"" "\"$f\"" "\"$f.tmp\"")
+       "mkdir -p \"$(dirname \"$f\")\"; rm -f \"$f.tmp\"; printf '%s' \"$out\" > \"$f.tmp\"; "
+       "if [ $(wc -c < \"$f.tmp\") -ne \"$2\" ]; then echo \"short input for $f\" >&2; exit 4; fi; "
+       "mv -f \"$f.tmp\" \"$f\"; }; "
+       "e=\"$d/" events-file "\"; " (refuse-links "\"$d\"" "\"$e\"") "mkdir -p \"$d\"; "
+       (str/join (for [{:keys [path output]} items]
+                   (str (when output
+                          (str "IFS= read -r out; put " (sh-quote path) " " (utf8-len output) "; "))
+                        "IFS= read -r ev; printf '%s\\n' \"$ev\" >> \"$e\"; ")))))
 
 (defn- valid-path!
   "PATH, relative to the feed, or throw: no `..', never absolute."
@@ -247,20 +267,23 @@
       (when (str/starts-with? out "+") (subs out 1))))
 
   Batched
-  (put-append [_ path s line]
-    ;; stdin is the event line, then the output.  The output is renamed
-    ;; in place before the event is appended, in the one command.
+  (push [_ items]
+    ;; stdin is each item's output line, if any, then its event line.
+    ;; Each output is renamed in place before its event is appended.
+    (doseq [{:keys [path output event]} items]
+      (when output (valid-path! path))
+      (when (some #(str/includes? (str %) "\n") [output event])
+        (throw (ex-info "an output or event of more than one line" {}))))
     (run-sh! cmd
-             (str "set -e; IFS= read -r ev; "
-                  "(" (put-sh to (valid-path! path) (utf8-len s)) "); "
-                  (append-sh to))
-             (str line "\n" s)
+             (push-sh to items)
+             (str/join (for [{:keys [output event]} items]
+                         (str (when output (str output "\n")) event "\n")))
              timeout-ms)))
 
 (defn via
   "The sink that writes the feed into TO, an absolute path, by running
   CMD, a shell-words string such as \"docker exec -i box\", followed by
-  `sh -c SCRIPT': one command per put, append or result."
+  `sh -c SCRIPT': one command per put, append, or push of a batch."
   ([cmd to] (via cmd to {}))
   ([cmd to {:keys [timeout-ms] :or {timeout-ms 30000}}]
    (let [words (p/tokenize (str cmd))

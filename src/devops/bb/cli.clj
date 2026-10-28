@@ -20,7 +20,7 @@
    [devops.bb.log :as log]
    [devops.bb.publish :as publish])
   (:import
-   [java.time Duration OffsetDateTime]))
+   [java.time Duration]))
 
 (defn- elisp-str [s] (pr-str (str s)))
 
@@ -198,12 +198,17 @@
                          (:id e)])))
 
 (def stale-after
-  "A heartbeat older than this is stale; the publisher writes one every 3 s."
+  "A heartbeat that has not changed for this long is stale; the
+  publisher writes one every 3 s."
   (Duration/ofSeconds 15))
 
-(defn- age [time now]
-  (try (Duration/between (OffsetDateTime/parse time) now)
-       (catch Exception _ nil)))
+(defn- dropped
+  "Event E as follow prints it: a `dropped' event, the publisher's word
+  for the seqs before it that it had to drop, as a notice."
+  [e]
+  (if (and (= :dropped (:event e)) (number? (:from e)) (number? (:to e)))
+    (str (inc (- (:to e) (:from e))) " events dropped (seq " (:from e) "-" (:to e) ")")
+    e))
 
 (defn- tail-items
   "Notices and events for what is left of the feeds from ST's epoch, up
@@ -215,20 +220,24 @@
               (seq evs)   (cons (str "the rest of feed " e ", which has ended: seq "
                                      (:seq (first evs)) "-" (:seq (last evs))
                                      "; ack these with --epoch " e)
-                                evs)))
+                                (map dropped evs))))
           (feed/tails dir epoch after new)))
 
 (defn feed-poll
-  "One look at the feed at DIR, from ST, the last look's state, at NOW:
-  [st items], ITEMS the new events and notices, strings, in the order
-  to print them.  ST's :epoch and :seq are where reading is: the feed,
-  by its `started', and the last seq read.
+  "One look at the feed at DIR, from ST, the last look's state, at NOW,
+  in ns on this machine's monotonic clock (System/nanoTime): [st items],
+  ITEMS the new events and notices, strings, in the order to print
+  them.  ST's :epoch and :seq are where reading is: the feed, by its
+  `started', and the last seq read.
 
   A later epoch, in status.json or on an event, is a new feed: what is
   left of the old one comes first, then a notice, then the new feed
-  from seq 1, on the first look too.  A notice also says once what the
-  events cannot: the heartbeat is stale, the publisher is behind, or it
-  is detached."
+  from seq 1, on the first look too.  A `dropped' event is a notice.  A
+  notice also says once what the events cannot: the heartbeat is stale,
+  the publisher is behind, or it is detached.  The heartbeat is stale
+  when `publisher-time' has not changed for `stale-after' on NOW's
+  clock: it is never compared with this machine's time, which may be
+  off the host's."
   [dir st now]
   (let [{:keys [started attached publisher-time queued] :as status} (feed/status dir)
         st       (cond-> st (and started (nil? (:epoch st))) (assoc :epoch started))
@@ -240,8 +249,9 @@
                    new (-> (assoc :epoch new :seq 0 :offset 0) (dissoc :detached :stale :behind)))
         r        (if new (feed/events-after dir st) r)
         st       (merge st (select-keys r [:offset :seq :epoch]))
-        old      (some-> publisher-time (age now))
-        stale?   (and (true? attached) old (pos? (compare old stale-after)))
+        st       (cond-> st (not= publisher-time (:beat st)) (assoc :beat publisher-time :beat-at now))
+        old      (Duration/ofNanos (- now (:beat-at st)))
+        stale?   (and (true? attached) publisher-time (pos? (compare old stale-after)))
         behind?  (and (number? queued) (pos? queued)
                       (some? (:queued-at st)) (not= publisher-time (:queued-at st)))
         notices  (cond-> []
@@ -252,7 +262,7 @@
                    (into (concat tail [(str "feed restarted at " new ": seq starts again at 1")]))
 
                    (and stale? (not (:stale st)))
-                   (conj (str "publisher heartbeat is " (.getSeconds ^Duration old) " s old"
+                   (conj (str "publisher heartbeat has not changed for " (.getSeconds old) " s"
                               (when (pos? (or queued 0)) (str "; publisher is " queued " events behind"))))
 
                    (and behind? (not stale?) (not (:behind st)))
@@ -267,7 +277,7 @@
                     :queued-at (when (and (number? queued) (pos? queued))
                                  (or (:queued-at st) publisher-time)))
        (or behind? (:behind st)) (assoc :behind (boolean (and (number? queued) (pos? queued)))))
-     (into notices (:events r))]))
+     (into notices (map dropped (:events r)))]))
 
 ;;; The cursor
 
@@ -389,7 +399,7 @@
                                           :seq after})
                  (or cursor {:seq 0}))]
     (follow-loop (fn [st]
-                   (let [[st items] (feed-poll dir st (OffsetDateTime/now))]
+                   (let [[st items] (feed-poll dir st (System/nanoTime))]
                      [st (map #(cond (string? %) (str "! " %)
                                      json        (json-event %)
                                      :else       (str (:seq %) " " (summary-line %)))

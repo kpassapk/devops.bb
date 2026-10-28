@@ -122,8 +122,9 @@ prints the first batch of events after your cursor and exits.
 | Notice | Means |
 |---|---|
 | `! no feed yet at DIR` | the feed has not been published; wait, or tell the operator |
-| `! publisher heartbeat is N s old` | the operator's publisher is not refreshing; Emacs may be busy or gone |
+| `! publisher heartbeat has not changed for N s` | the operator's publisher is not refreshing; Emacs may be busy or gone |
 | `! publisher is N events behind` | runs are queued on the host; wait |
+| `! N events dropped (seq A-B)` | the host's queue was full and lost those events; they will not come. Ask the operator what ran, if it matters; ack past them as usual |
 | `! feed detached: …` | the operator detached; no more events until they attach again |
 | `! the rest of feed E, which has ended: seq A-B; …` | the operator attached again before you acked these; the lines after it, up to the restart notice, are that old feed's. Handle them, and ack with `devops-bb ack SEQ --epoch E` |
 | `! feed restarted at T: seq starts again at 1` | a new attach: the lines after it are the new feed's, from seq 1; `ack SEQ` now means this feed's seq |
