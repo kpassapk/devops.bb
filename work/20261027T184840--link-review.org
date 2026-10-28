@@ -634,15 +634,43 @@ save comes from =save-result= and which from the operator's
 tail -n 8 "$(emacsclient --eval devops-bb-execution-log | tr -d \")" | jq -c '{type, file, time}'
 #+end_src
 
+Result: every save is =save-result='s; the operator's run makes none.
+On the =linkrev= rig (main's code), with an =after-save-hook= that
+looked for =devops-bb-review--save-result= in the backtrace: probe-1
+async (=C-c C-c=) gave =save=, =execute running=, =save=, =result=
+within 4 ms, both saves from =save-result= (after the placeholder,
+then after the result); probe-2 sync (=:async no=) gave =save=, then
+=execute done=, the save again from =save-result=, made by the
+result's insert inside the run, before =org-babel-after-execute-hook=.
+=save-buffer= is called nowhere else in =emacs/=, so binding the
+origin in =save-result= covers every automatic save, the placeholder's
+included.  (The log's field is =event=, not =type=.)
+
 *** Done when
 
-- [ ] Events carry =origin=: =operator=, =auto= (the save made by
+- [X] Events carry =origin=: =operator=, =auto= (the save made by
   =devops-bb-review--save-result=) or =agent=.
-- [ ] =save= and =revert= carry the file's sha256.  The agent records
+  Every entry has =origin=, from =devops-bb-log-origin= (nil is
+  =operator=), which =save-result= binds to =auto= around its save.
+  Emacs cannot know =agent=: =follow= marks it (below).  It is in
+  =follow='s line, =SEQ event status origin file:line id=, and in
+  =--json=.
+- [X] =save= and =revert= carry the file's sha256.  The agent records
   the hash after each of its writes (a new =devops-bb wrote=), and =follow=
   marks a =revert= with a matching hash =origin: agent=.
+  The hash is of the bytes on disk after the save or revert.
+  =devops-bb wrote FILE= keeps the last 20 in =FEED.wrote= beside the
+  cursor; a revert to any of them is =agent=, one to anything else
+  stays =operator=.
 - [ ] Experiment 3, re-run with one write per agent turn: no echo is
   treated as operator activity.
+  Not run with a live Claude.  Simulated end to end on the rig, with
+  this branch loaded in the =linkrev= Emacs and copied into =lr-box=:
+  two writes from =podman exec -u claude=, each followed by
+  =devops-bb wrote /work/wb.org=, between two operator saves and one
+  run, gave =revert agent= for both writes, =save operator= for the
+  two saves and =save auto= for the run's two; nothing else was
+  =agent=.
 
 ** TODO 5. =follow --wake=: one line per thing to act on
 :PROPERTIES:

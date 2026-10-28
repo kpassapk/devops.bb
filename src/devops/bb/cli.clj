@@ -9,8 +9,8 @@
   Feed mode, in a sandbox: with DEVOPS_BB_FEED=DIR or --feed DIR, never
   guessed, `status', `follow', `run-output' and `modified' read the feed
   one attached workbook publishes there (devops.bb.feed), `ack' moves
-  the agent's cursor in it, and every other command fails: no command
-  asks Emacs."
+  the agent's cursor in it, `wrote' records the agent's writes, and
+  every other command fails: no command asks Emacs."
   (:require
    [babashka.fs :as fs]
    [cheshire.core :as json]
@@ -20,6 +20,7 @@
    [devops.bb.log :as log]
    [devops.bb.publish :as publish])
   (:import
+   [java.security MessageDigest]
    [java.time Duration]))
 
 (defn- elisp-str [s] (pr-str (str s)))
@@ -185,7 +186,8 @@
 ;;; Following the log
 
 (defn summary-line
-  "One short line for event E: what, how it went, where, and the run ID."
+  "One short line for event E: what, how it went, who caused it, where,
+  and the run ID."
   [e]
   (str/join " " (remove str/blank?
                         [(name (:event e))
@@ -194,6 +196,7 @@
                                                           "same" "drift")
                                (= :tangle (:event e))   "done"
                                :else                    (str (:status e)))
+                         (some-> (:origin e) name)
                          (str (:file e) ":" (if (true? (:all e)) "all" (or (:line e) "all")))
                          (:id e)])))
 
@@ -338,6 +341,56 @@
       (println (json/generate-string
                 (if (ahead? new cursor) (write-cursor! dir opts new) cursor))))))
 
+;;; The agent's writes
+
+(def wrote-kept
+  "How many of the agent's last writes `wrote' keeps."
+  20)
+
+(defn- wrote-path
+  "Where the agent's writes to the feed at DIR are kept: beside its
+  cursor, FEED.wrote."
+  [dir opts]
+  (str (fs/strip-ext (cursor-path dir opts)) ".wrote"))
+
+(defn- sha256 [file]
+  (let [d (.digest (MessageDigest/getInstance "SHA-256") (fs/read-all-bytes file))]
+    (apply str (map #(format "%02x" (bit-and % 0xff)) d))))
+
+(defn- wrote-entries
+  "The agent's last writes to the feed at DIR, oldest first, maps."
+  [dir opts]
+  (let [f (wrote-path dir opts)]
+    (when (fs/exists? f)
+      (keep #(try (json/parse-string % true) (catch Exception _ nil))
+            (str/split-lines (slurp f))))))
+
+(defn wrote
+  "FILE: you just wrote it; its sha256 is kept, so follow marks the
+  revert Emacs makes of it `origin agent'"
+  {:org.babashka/cli {:args->opts [:file] :require [:file]}}
+  [{:keys [file] :as opts}]
+  (let [dir   (or (feed/configured opts)
+                  (fail "wrote needs a feed: set DEVOPS_BB_FEED, or pass --feed"))
+        _     (when-not (fs/regular-file? file) (fail (str "no such file: " file)))
+        entry (array-map :file (abs file) :sha256 (sha256 file))
+        f     (wrote-path dir opts)
+        tmp   (str f ".tmp")]
+    (fs/create-dirs (fs/parent f))
+    (spit tmp (str/join (map #(str (json/generate-string %) "\n")
+                             (take-last wrote-kept (concat (wrote-entries dir opts) [entry])))))
+    (fs/move tmp f {:replace-existing true :atomic-move true})
+    (println (json/generate-string entry))))
+
+(defn mark-agent
+  "ITEMS, events and notices, with each revert whose sha256 is in
+  HASHES marked `origin agent': Emacs reloaded a file the agent wrote."
+  [items hashes]
+  (map #(if (and (map? %) (= :revert (:event %)) (contains? hashes (:sha256 %)))
+          (assoc % :origin "agent")
+          %)
+       items))
+
 ;;; follow
 
 (defn- json-event [e]
@@ -391,7 +444,7 @@
   --after N, from N, in the cursor's feed, and the cursor is moved
   there.  The cursor only moves on --after and `ack': follow keeps
   where it read in memory, so a restarted follow gives again what was
-  not acked."
+  not acked.  A revert of a file as `wrote' last saw it is the agent's."
   [dir {:keys [after json] :as opts}]
   (let [cursor (read-cursor dir opts)
         from   (if after
@@ -399,7 +452,10 @@
                                           :seq after})
                  (or cursor {:seq 0}))]
     (follow-loop (fn [st]
-                   (let [[st items] (feed-poll dir st (System/nanoTime))]
+                   (let [[st items] (feed-poll dir st (System/nanoTime))
+                         items (if (some #(= :revert (:event %)) (filter map? items))
+                                 (mark-agent items (set (keep :sha256 (wrote-entries dir opts))))
+                                 items)]
                      [st (map #(cond (string? %) (str "! " %)
                                      json        (json-event %)
                                      :else       (str (:seq %) " " (summary-line %)))

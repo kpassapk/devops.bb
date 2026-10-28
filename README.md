@@ -191,8 +191,9 @@ and never start `emacsclient`. Feed mode is never turned on by itself.
 | Command | Answers |
 |---|---|
 | `devops-bb status` | the feed, the workbook, `attached`, the publisher's heartbeat, `queued` |
-| `devops-bb follow [--after SEQ] [--json] [--once \| --count N]` | `SEQ event status file:line id` per event after the cursor, or after `--after`, which sets it; notices as `! …`, on stdout |
+| `devops-bb follow [--after SEQ] [--json] [--once \| --count N]` | `SEQ event status origin file:line id` per event after the cursor, or after `--after`, which sets it; notices as `! …`, on stdout |
 | `devops-bb ack SEQ [--epoch E]` | moves the cursor, in `~/.cache/devops-bb/cursor/FEED.json`, to SEQ of this feed, or of the earlier feed E |
+| `devops-bb wrote FILE` | after the agent writes FILE: keeps its sha256 in `FEED.wrote` beside the cursor (the last 20), and `follow` marks the `revert` of it `origin` `agent` |
 | `devops-bb run-output ID` | that run's output, as on the host, with `truncated` when cut |
 | `devops-bb modified` | whether you have unsaved edits to the workbook |
 
@@ -312,7 +313,10 @@ emacs --init-directory=~/src/github.com/kpassapk/devops.bb/emacs/reference
 `devops-bb-log-mode` writes a line when a block runs, when an async
 block's result arrives, when `devops-tangle` or `devops-drift` runs, and
 when an org buffer is first modified, saved, reverted, or killed with
-unsaved edits. The log holds no output.
+unsaved edits. The log holds no output. Each line has an `origin`:
+`operator`, or `auto` for the save made as a result lands in an
+attached workbook; `save` and `revert` carry the file's `sha256` on
+disk.
 
 ## Dashboard
 

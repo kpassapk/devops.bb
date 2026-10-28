@@ -14,7 +14,14 @@
     unmodified, `save' when it is saved, `revert' when it is reloaded
     from disk, and `kill' when it is killed with unsaved edits.  The
     last of these for a file says whether Emacs holds unsaved edits to
-    it.
+    it.  `save' and `revert' carry the file's `sha256' on disk, so the
+    agent can tell a revert of its own write from another.
+
+  Every line has an `origin': `operator', or `auto' for what devops.bb
+  does by itself, as `devops-bb-log-origin' says: the save
+  `devops-bb-review--save-result' makes as a result lands.  In the
+  sandbox, `follow' marks the reverts of the agent's own writes
+  `agent'.
 
   A line is a notification, not a record: it says what happened and
   where, and carries no output, #+RESULTS or diff.  The agent reads
@@ -56,6 +63,11 @@ target.")
 The run, not the user, is changing the buffer, so
 `devops-bb-log--on-change' logs no `modify' for it.")
 
+     (defvar devops-bb-log-origin nil
+       "The `origin' of the entries emitted now: nil, the operator, or \"auto\".
+Bound to \"auto\" around what devops.bb does by itself, such as the save
+`devops-bb-review--save-result' makes.")
+
      (defvar devops-bb-log--subscribers nil
        "Functions `devops-bb-log-subscribe' added for every buffer, in order.")
 
@@ -78,7 +90,8 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
   {:time (el/format-time-string "%FT%T.%3N%z")
    :event event
    :file (el/buffer-file-name (el/buffer-base-buffer))
-   :buffer (el/buffer-name)})
+   :buffer (el/buffer-name)
+   :origin (or el/devops-bb-log-origin "operator")})
 
 ;;; Subscribers
 
@@ -254,14 +267,25 @@ Global, not buffer-local: `revert-buffer' kills buffer-locals.")
 
 ;;; Unsaved edits
 
-(defn- edit! [event]
-  (when (and (el/derived-mode-p 'org-mode)
-             (el/buffer-file-name (el/buffer-base-buffer)))
-    (emit event)))
+(defn- sha256
+  "The sha256 of FILE's bytes on disk, or nil if it cannot be read."
+  [file]
+  (when (el/file-readable-p file)
+    (el! (with-temp-buffer
+          (set-buffer-multibyte nil)
+          (insert-file-contents-literally (clj! file))
+          (secure-hash 'sha256 (current-buffer))))))
+
+(defn- edit!
+  "Log EVENT for an org file's buffer; with HASH, with the file's sha256."
+  [event & [hash]]
+  (when-let [file (and (el/derived-mode-p 'org-mode)
+                       (el/buffer-file-name (el/buffer-base-buffer)))]
+    (emit event (when hash (fn [] {:sha256 (sha256 file)})))))
 
 (defn- on-change [] (when-not el/devops-bb-log--inserting (edit! "modify")))
-(defn- on-save [] (edit! "save"))
-(defn- on-revert [] (edit! "revert"))
+(defn- on-save [] (edit! "save" true))
+(defn- on-revert [] (edit! "revert" true))
 (defn- on-kill [] (when (el/buffer-modified-p) (edit! "kill")))
 
 ;;; Mode

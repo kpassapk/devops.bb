@@ -766,10 +766,14 @@ modified until the operator reverts it."
   :type 'boolean
   :group 'devops)
 
+(defvar devops-bb-log-origin)
+
 (defun devops-bb-review--save-result (fn &rest args)
   "Around `org-babel-insert-result' (FN with ARGS): save an attached buffer.
 Never prompts, as this can run in a process filter.  Skips the save when
-the file changed on disk, so that the file Claude wrote is not overwritten."
+the file changed on disk, so that the file Claude wrote is not overwritten.
+The `save' entry the log gets for it has origin `auto': the operator
+did not save."
   (prog1 (apply fn args)
     (when devops-bb-review-save-results
       (let ((base (or (buffer-base-buffer) (current-buffer))))
@@ -781,7 +785,8 @@ the file changed on disk, so that the file Claude wrote is not overwritten."
                 (message "devops-bb: %s changed on disk; not saved"
                          (file-name-nondirectory buffer-file-name))
               (condition-case err
-                  (let ((inhibit-message t))
+                  (let ((inhibit-message t)
+                        (devops-bb-log-origin "auto"))
                     (save-buffer))
                 (error (message "devops-bb: not saved: %s"
                                 (error-message-string err)))))))))))

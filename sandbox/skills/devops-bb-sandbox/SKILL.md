@@ -48,7 +48,8 @@ and why.
    runs"). It resumes from your cursor, the last event you acked, so
    nothing is lost when it is started again.
 3. Check `devops-bb modified`, then write blocks into the workbook
-   (see "Editing the workbook").
+   (see "Editing the workbook"), and run `devops-bb wrote
+   /work/wb.org` right after each write.
 4. Tell the operator what you wrote and what to run. They run it; you
    see it in `follow`.
 5. Read each run with `devops-bb run-output ID`, tell the operator what
@@ -63,6 +64,7 @@ and why.
 | `devops-bb status` | `feed`, `workbook`, `devops-mode`, `attached`, `started`, `publisher-time`, `queued`, `dropped` |
 | `devops-bb follow [--json] [--once \| --count N]` | a line per event after your cursor, and notices; runs until stopped |
 | `devops-bb ack SEQ [--epoch E]` | moves your cursor to `SEQ`: events up to it are handled |
+| `devops-bb wrote FILE` | records FILE's hash as you just wrote it, so its `revert` comes back as yours |
 | `devops-bb run-output ID` | one run's output, by the ID `follow` printed |
 | `devops-bb modified` | `true` when the operator has unsaved edits to the workbook |
 
@@ -73,12 +75,16 @@ operator instead.
 ## Following runs
 
 ```
-1 execute running /work/wb.org:7 0b9e1b1a-1111-4222-8333-444455556666
-2 result done /work/wb.org:7 0b9e1b1a-1111-4222-8333-444455556666
-3 modify /work/wb.org:all
+1 save auto /work/wb.org:all
+2 execute running operator /work/wb.org:7 0b9e1b1a-1111-4222-8333-444455556666
+3 save auto /work/wb.org:all
+4 result done operator /work/wb.org:7 0b9e1b1a-1111-4222-8333-444455556666
+5 revert agent /work/wb.org:all
+6 modify operator /work/wb.org:all
 ```
 
-That is: `seq`, event, how it went, `file:line`, and the run's ID.
+That is: `seq`, event, how it went, who caused it (`origin`),
+`file:line`, and the run's ID.
 
 - An async block (a shell block on a `#+TARGET`) logs `execute running`,
   then `result done`. Read it on `result`.
@@ -86,8 +92,12 @@ That is: `seq`, event, how it went, `file:line`, and the run's ID.
   only `execute`, with an ID and `sync` true in `--json`. Its output is
   its `#+RESULTS:`, as org formatted it; stderr is lost unless the block
   captures it.
-- `modify`, `save`, `revert`, `kill`: the operator's edits to the
-  workbook.
+- `modify`, `save`, `revert`, `kill`: edits to the workbook. Only
+  `origin` `operator` is the operator's doing. `auto` is the save
+  Emacs makes as each result lands, and `agent` is Emacs reloading a
+  file you wrote (its sha256 matches one `devops-bb wrote` kept).
+  Neither needs any action: ack them and go on. A `revert` with
+  `operator` is a write you did not record, or someone else's.
 - `follow` runs until stopped, and starts from your cursor: the last
   event you acked with `devops-bb ack SEQ`, kept in
   `~/.cache/devops-bb/cursor/`, so it survives `/compact` and a
@@ -162,7 +172,16 @@ devops-bb modified
 
 `true` means unsaved edits: ask the operator to save, and don't write.
 After you write, the operator's Emacs reloads the buffer on its own
-(auto-revert); there is no `revert` here.
+(auto-revert); there is no `revert` here. Right after every write, in
+the same command:
+
+```
+devops-bb wrote /work/wb.org
+```
+
+It keeps the file's sha256 beside your cursor (the last 20), and
+`follow` then prints the `revert` your write causes as `origin` `agent`
+instead of `operator`.
 
 Add blocks; don't rewrite blocks the operator already ran or edited.
 Leave `#+RESULTS:` alone.

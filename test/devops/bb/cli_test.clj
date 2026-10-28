@@ -21,7 +21,10 @@
          (cli/summary-line {:event :drift :all true :file "/w/a.org" :line 9
                             :files [{:status "same"} {:status "missing"}]})))
   (is (= "tangle done /w/a.org:9"
-         (cli/summary-line {:event :tangle :all false :file "/w/a.org" :line 9 :targets []}))))
+         (cli/summary-line {:event :tangle :all false :file "/w/a.org" :line 9 :targets []})))
+  (testing "with who caused it"
+    (is (= "save auto /w/a.org:all"
+           (cli/summary-line {:event :save :origin "auto" :file "/w/a.org" :sha256 "ab"})))))
 
 ;;; Feed mode
 
@@ -341,3 +344,59 @@
              (first lines)))
       (is (= ["1 modify" "2 modify" "3 modify"]
              (map #(subs % 0 8) (remove #(str/starts-with? % "! ") lines)))))))
+
+(deftest wrote-test
+  (let [fake (ft/fake-emacsclient!)
+        work (str (fs/create-temp-dir))
+        wb   (str (fs/path work "wb.org"))
+        hash (fn [text] (spit wb text) (str/trim (:out (p/shell {:out :string} "shasum" "-a" "256" wb))))
+        h1   (subs (hash "* one\n") 0 64)
+        h2   (subs (hash "* two\n") 0 64)
+        dir  (publish-to! (str (fs/path (str (fs/create-temp-dir)) "feed"))
+                          {:event "status" :file "/h/w/wb.org" :devops-mode true}
+                          {:event "modify" :file "/h/w/wb.org" :origin "operator"}
+                          {:event "save" :file "/h/w/wb.org" :origin "operator" :sha256 "0ff"}
+                          {:event "revert" :file "/h/w/wb.org" :origin "operator" :sha256 h1}
+                          {:event "revert" :file "/h/w/wb.org" :origin "operator" :sha256 h2}
+                          {:event "save" :file "/h/w/wb.org" :origin "auto" :sha256 h1})
+        run  (fn [& args] (let [r (apply bb fake dir args)]
+                            [(:exit r) (str/trim (:out r)) (str/trim (:err r))]))
+        events (fn [o] (remove #(str/starts-with? % "! ") (str/split-lines o)))
+        wrote-file (str (fs/path fake "cursor" "wb.wrote"))]
+    (testing "wrote FILE: its sha256, beside the cursor"
+      (spit wb "* one\n")
+      (let [[exit o err] (run "wrote" wb)]
+        (is (= [0 ""] [exit err]))
+        (is (= {:file wb :sha256 h1} (json/parse-string o true)))
+        (is (= [{:file wb :sha256 h1}]
+               (map #(json/parse-string % true) (str/split-lines (slurp wrote-file)))))))
+    (testing "follow marks a revert to what the agent wrote, and only that, origin agent"
+      (is (= ["1 modify operator /work/wb.org:all"
+              "2 save operator /work/wb.org:all"
+              "3 revert agent /work/wb.org:all"
+              "4 revert operator /work/wb.org:all"
+              "5 save auto /work/wb.org:all"]
+             (events (second (run "follow" "--once")))))
+      (is (= ["agent" "operator"]
+             (->> (events (second (run "follow" "--once" "--json")))
+                  (map #(json/parse-string % true))
+                  (filter #(= "revert" (:event %)))
+                  (map :origin)))))
+    (testing "the last writes are kept, at most wrote-kept"
+      (dotimes [i (inc cli/wrote-kept)]
+        (spit wb (str "* " i "\n"))
+        (run "wrote" wb))
+      (let [kept (map #(json/parse-string % true) (str/split-lines (slurp wrote-file)))]
+        (is (= cli/wrote-kept (count kept)))
+        (is (not-any? #(= h1 (:sha256 %)) kept))
+        (is (= ["3 revert operator"]
+               (->> (events (second (run "follow" "--once")))
+                    (filter #(str/includes? % " revert "))
+                    (take 1)
+                    (map #(str/join " " (take 3 (str/split % #" ")))))))))
+    (testing "wrote needs a feed, and a file"
+      (let [r (p/shell {:in "" :out :string :err :string :continue true :env (ft/bb-env fake {})}
+                       "bb" "--config" ft/bb-edn "wrote" wb)]
+        (is (= 1 (:exit r)))
+        (is (str/includes? (:err r) "needs a feed")))
+      (is (= 1 (first (run "wrote" (str wb ".missing"))))))))

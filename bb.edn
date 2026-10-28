@@ -24,6 +24,8 @@
               :exec-fn devops.bb.cli/follow}
   ack        {:doc "SEQ [--epoch E]: feed mode: events up to SEQ are handled; moves the cursor follow resumes from"
               :exec-fn devops.bb.cli/ack}
+  wrote      {:doc "FILE: feed mode: you just wrote FILE; follow marks Emacs's revert of it origin agent"
+              :exec-fn devops.bb.cli/wrote}
   modified   {:doc "FILE: does Emacs hold unsaved edits to it (feed mode: FILE optional)"
               :exec-fn devops.bb.cli/modified}
   revert     {:doc "FILE: reload its buffer from disk"

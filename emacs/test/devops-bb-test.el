@@ -757,10 +757,16 @@ The blocks it runs for noweb are not logged."
             (insert "d\n")
             (let ((kill-buffer-query-functions nil))
               (kill-buffer))
-            (let ((entries (devops-bb-test--log-entries log)))
+            (let ((entries (devops-bb-test--log-entries log))
+                  (sha (secure-hash 'sha256 "* A\nb\nc\n")))
               (should (equal (mapcar (lambda (e) (alist-get 'event e)) entries)
                              '("modify" "save" "revert" "modify" "kill")))
-              (should (equal (alist-get 'file (car entries)) file))))
+              (should (equal (alist-get 'file (car entries)) file))
+              (should (equal (mapcar (lambda (e) (alist-get 'origin e)) entries)
+                             (make-list 5 "operator")))
+              ;; The file on disk, after the save and after the revert.
+              (should (equal (mapcar (lambda (e) (alist-get 'sha256 e)) entries)
+                             (list nil sha sha nil nil)))))
         (delete-file file)))))
 
 ;;; Subscribers
@@ -1491,10 +1497,21 @@ prompts once, with the diff; `d' shows all of it."
 
 (ert-deftest devops-bb-review-save-result-test ()
   "A run in an attached buffer saves it as the result lands.  When Claude
-wrote the file meanwhile, nothing is saved or asked, and Claude's file stays."
+wrote the file meanwhile, nothing is saved or asked, and Claude's file stays.
+Its save is logged with origin `auto', and the file's sha256."
   (devops-bb-test--with-workbook (root buf devops-bb-test--named-block)
     (let ((file (buffer-file-name)))
-      (devops-bb-test--execute-at "begin_src")
+      (devops-bb-test--with-subscriber entries buf
+        (devops-bb-test--execute-at "begin_src")
+        (should (equal (mapcar (lambda (e) (gethash :event e)) entries)
+                       '("save" "execute")))
+        (should (equal (mapcar (lambda (e) (gethash :origin e)) entries)
+                       '("auto" "operator")))
+        (should (equal (gethash :sha256 (car entries))
+                       (with-temp-buffer
+                         (set-buffer-multibyte nil)
+                         (insert-file-contents-literally file)
+                         (secure-hash 'sha256 (current-buffer))))))
       (should-not (buffer-modified-p))
       (should (string-match-p "#\\+RESULTS" (with-temp-buffer
                                               (insert-file-contents file)
